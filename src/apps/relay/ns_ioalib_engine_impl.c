@@ -298,7 +298,7 @@ ioa_engine_handle create_ioa_engine(super_memory_t *sm,
 			}
 			e->relays_number = relays_number;
 		}
-		e->relay_addr_counter = (unsigned short) random();
+		e->relay_addr_counter = (unsigned short) turn_random();
 		timer_handler(e,e);
 		e->timer_ev = set_ioa_timer(e, 1, 0, timer_handler, e, 1, "timer_handler");
 		return e;
@@ -795,15 +795,6 @@ int set_socket_options_fd(evutil_socket_t fd, int tcp, int family)
 		set_raw_socket_ttl_options(fd, family);
 		set_raw_socket_tos_options(fd, family);
 
-#ifdef SO_BSDCOMPAT
-		//Linux. Option may be obsolete,
-		{
-			int on = 1;
-			if(setsockopt(fd, SOL_SOCKET, SO_BSDCOMPAT, (void *)&on, sizeof(on))<0)
-			perror("SO_BSDCOMPAT");
-		}
-#endif
-
 #ifdef IP_RECVERR
 		if (family != AF_INET6) {
 			int on = 0;
@@ -1070,6 +1061,10 @@ int create_relay_ioa_sockets(ioa_engine_handle e,
 		if (*rtp_s) {
 			addr_set_port(&local_addr, port);
 			addr_debug_print(e->verbose, &local_addr, "Local relay addr");
+			if (rtcp_s && *rtcp_s) {
+				addr_set_port(&local_addr, port+1);
+				addr_debug_print(e->verbose, &local_addr, "Local reserved relay addr");
+			}
 			break;
 		}
 	}
@@ -3224,7 +3219,7 @@ const char* get_ioa_socket_tls_method(ioa_socket_handle s)
 
 ///////////// Super Memory Region //////////////
 
-#define TURN_SM_SIZE (1824<<10)
+#define TURN_SM_SIZE (1024<<12)
 
 struct _super_memory {
 	pthread_mutex_t mutex_sm;
@@ -3299,6 +3294,8 @@ void* allocate_super_memory_region_func(super_memory_t *r, size_t size, const ch
 				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"(%s:%s:%d): allocated super memory: region id = %u, chunk=%lu, total=%lu, allocated=%lu, want=%lu\n",file,func,line,(unsigned int)r->id, (unsigned long)r->sm_chunk, (unsigned long)r->sm_total_sz, (unsigned long)r->sm_allocated,(unsigned long)size);
 
 			char* ptr = r->super_memory + r->sm_total_sz - r->sm_allocated - size;
+
+			ns_bzero(ptr, size);
 
 			r->sm_allocated += size;
 

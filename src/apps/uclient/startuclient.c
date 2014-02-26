@@ -61,7 +61,7 @@ int rare_event(void)
 int not_rare_event(void)
 {
 	if(dos)
-		return ((((unsigned long)random()) %1000) < 900);
+		return ((((unsigned long)random()) %1000) < 200);
 	return 0;
 }
 
@@ -78,7 +78,7 @@ static int get_allocate_address_family(ioa_addr *relay_addr) {
 
 static SSL* tls_connect(ioa_socket_raw fd, ioa_addr *remote_addr)
 {
-	int ctxtype = (int)random()%root_tls_ctx_num;
+	int ctxtype = (int)(((unsigned long)random())%root_tls_ctx_num);
 
 	SSL *ssl = SSL_new(root_tls_ctx[ctxtype]);
 

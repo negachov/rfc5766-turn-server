@@ -546,8 +546,12 @@ static mobile_id_t get_new_mobile_id(turn_turnserver* server)
 		sid = sid<<56;
 		do {
 			while (!newid) {
-				newid = (mobile_id_t)random();
-				newid = (newid<<32) + (mobile_id_t)random();
+				if(TURN_RANDOM_SIZE == sizeof(mobile_id_t))
+					newid = (mobile_id_t)turn_random();
+				else {
+					newid = (mobile_id_t)turn_random();
+					newid = (newid<<32) + (mobile_id_t)turn_random();
+				}
 				if(!newid) {
 					continue;
 				}
@@ -1745,8 +1749,8 @@ static void tcp_peer_accept_connection(ioa_socket_handle s, void *arg)
 			ioa_network_buffer_set_size(nbh, len);
 		}
 
-		/* We add integrity for both long-term and short-term indication messages */
-		/* if(server->ct == TURN_CREDENTIALS_SHORT_TERM) */
+		/* We add integrity for short-term indication messages, only */
+		if(server->ct == TURN_CREDENTIALS_SHORT_TERM)
 		{
 			adjust_shatype(server,ss);
 			stun_attr_add_integrity_str(server->ct,ioa_network_buffer_data(nbh),&len,ss->hmackey,ss->pwd,ss->shatype);
@@ -1760,21 +1764,6 @@ static void tcp_peer_accept_connection(ioa_socket_handle s, void *arg)
 		}
 
 		write_client_connection(server, ss, nbh, TTL_IGNORE, TOS_IGNORE);
-
-		/* test */
-		if(0) {
-			int i = 0;
-			for(i=0;i<22;i++) {
-				ioa_network_buffer_handle nbh_test = ioa_network_buffer_allocate(server->e);
-				size_t len_test = ioa_network_buffer_get_size(nbh_test);
-				u08bits *data = ioa_network_buffer_data(nbh_test);
-				const char* data_test="111.222.222.222.222";
-				len_test = strlen(data_test);
-				ns_bcopy(data_test,data,len_test);
-				ioa_network_buffer_set_size(nbh_test,len_test);
-				send_data_from_ioa_socket_nbh(tc->peer_s, NULL, nbh_test, TTL_IGNORE, TOS_IGNORE);
-			}
-		}
 
 		FUNCEND;
 	}
@@ -2751,7 +2740,6 @@ static int check_stun_auth(turn_turnserver *server,
 			int can_resume)
 {
 	u08bits usname[STUN_MAX_USERNAME_SIZE+1];
-	u08bits realm[STUN_MAX_REALM_SIZE+1];
 	u08bits nonce[STUN_MAX_NONCE_SIZE+1];
 	size_t alen = 0;
 
@@ -2760,24 +2748,35 @@ static int check_stun_auth(turn_turnserver *server,
 
 	int new_nonce = 0;
 
-	if(ss->nonce[0]==0) {
-		int i = 0;
-		for(i=0;i<NONCE_LENGTH_32BITS;i++) {
-			u08bits *s = ss->nonce + 4*i;
-			u32bits rand=(u32bits)random();
-			snprintf((s08bits*)s, NONCE_MAX_SIZE-4*i, "%04x",(unsigned int)rand);
+	{
+		int generate_new_nonce = 0;
+		if(ss->nonce[0]==0) {
+			generate_new_nonce = 1;
+			new_nonce = 1;
 		}
-		ss->nonce_expiration_time = server->ctime + STUN_NONCE_EXPIRATION_TIME;
-		new_nonce = 1;
-	}
 
-	if(*(server->stale_nonce)) {
-		if(turn_time_before(ss->nonce_expiration_time,server->ctime)) {
+		if(*(server->stale_nonce)) {
+			if(turn_time_before(ss->nonce_expiration_time,server->ctime)) {
+				generate_new_nonce = 1;
+			}
+		}
+
+		if(generate_new_nonce) {
+
 			int i = 0;
-			for(i=0;i<NONCE_LENGTH_32BITS;i++) {
-				u08bits *s = ss->nonce + 4*i;
-				u32bits rand=(u32bits)random();
-				snprintf((s08bits*)s, NONCE_MAX_SIZE-4*i, "%04x",(unsigned int)rand);
+
+			if(TURN_RANDOM_SIZE == 8) {
+				for(i=0;i<(NONCE_LENGTH_32BITS>>1);i++) {
+					u08bits *s = ss->nonce + 8*i;
+					u64bits rand=(u64bits)turn_random();
+					snprintf((s08bits*)s, NONCE_MAX_SIZE-8*i, "%08lx",(unsigned long)rand);
+				}
+			} else {
+				for(i=0;i<NONCE_LENGTH_32BITS;i++) {
+					u08bits *s = ss->nonce + 4*i;
+					u32bits rand=(u32bits)turn_random();
+					snprintf((s08bits*)s, NONCE_MAX_SIZE-4*i, "%04x",(unsigned int)rand);
+				}
 			}
 			ss->nonce_expiration_time = server->ctime + STUN_NONCE_EXPIRATION_TIME;
 		}
@@ -2814,9 +2813,18 @@ static int check_stun_auth(turn_turnserver *server,
 			return -1;
 		}
 
+
+		u08bits realm[STUN_MAX_REALM_SIZE+1];
+
 		alen = min((size_t)stun_attr_get_len(sar),sizeof(realm)-1);
 		ns_bcopy(stun_attr_get_value(sar),realm,alen);
 		realm[alen]=0;
+
+		if(strcmp((char*)realm, (char*)(server->realm))) {
+			*err_code = 400;
+			*reason = (const u08bits*)"Bad request: the realm value incorrect";
+			return -1;
+		}
 	}
 
 	/* USERNAME ATTR: */
@@ -2855,8 +2863,8 @@ static int check_stun_auth(turn_turnserver *server,
 		/* Stale Nonce check: */
 
 		if(new_nonce) {
-			*err_code = 401;
-			*reason = (const u08bits*)"Unauthorized";
+			*err_code = 438;
+			*reason = (const u08bits*)"Wrong nonce";
 			return create_challenge_response(server,ss,tid,resp_constructed,err_code,reason,nbh,method);
 		}
 
@@ -3663,6 +3671,8 @@ static int create_relay_connection(turn_turnserver* server,
 				return -1;
 			}
 
+			addr_debug_print(server->verbose, get_local_addr_from_ioa_socket(newelem->s), "Local relay addr (RTCP)");
+
 		} else {
 
 			int res = create_relay_ioa_sockets(server->e,
@@ -4088,8 +4098,8 @@ static void peer_input_handler(ioa_socket_handle s, int event_type,
 					ioa_network_buffer_set_size(nbh, len);
 				}
 
-				/* We add integrity for both long-term and short-term indication messages */
-				/* if(server->ct == TURN_CREDENTIALS_SHORT_TERM) */
+				/* We add integrity for short-term indication messages, only */
+				if(server->ct == TURN_CREDENTIALS_SHORT_TERM)
 				{
 					adjust_shatype(server,ss);
 					stun_attr_add_integrity_str(server->ct,ioa_network_buffer_data(nbh),&len,ss->hmackey,ss->pwd,ss->shatype);
