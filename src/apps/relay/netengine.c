@@ -177,6 +177,12 @@ void add_listener_addr(const char* addr) {
 	if(make_ioa_addr((const u08bits*)addr,0,&baddr)<0) {
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"Cannot add a listener address: %s\n",addr);
 	} else {
+		size_t i = 0;
+		for(i=0;i<turn_params.listener.addrs_number;++i) {
+			if(addr_eq(turn_params.listener.encaddrs[turn_params.listener.addrs_number-1],&baddr)) {
+				return;
+			}
+		}
 		++turn_params.listener.addrs_number;
 		++turn_params.listener.services_number;
 		turn_params.listener.addrs = (char**)realloc(turn_params.listener.addrs, sizeof(char*)*turn_params.listener.addrs_number);
@@ -194,12 +200,23 @@ int add_relay_addr(const char* addr) {
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"Cannot add a relay address: %s\n",addr);
 		return -1;
 	} else {
+
+		char sbaddr[129];
+		addr_to_string_no_port(&baddr,(u08bits*)sbaddr);
+
+		size_t i = 0;
+		for(i=0;i<turn_params.relays_number;++i) {
+			if(!strcmp(turn_params.relay_addrs[turn_params.relays_number-1],sbaddr)) {
+				return 0;
+			}
+		}
+
 		++turn_params.relays_number;
 		turn_params.relay_addrs = (char**)realloc(turn_params.relay_addrs, sizeof(char*)*turn_params.relays_number);
-		turn_params.relay_addrs[turn_params.relays_number-1]=strdup(addr);
+		turn_params.relay_addrs[turn_params.relays_number-1]=strdup(sbaddr);
 
-		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "Relay address to use: %s\n",addr);
-		return 0;
+		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "Relay address to use: %s\n",sbaddr);
+		return 1;
 	}
 }
 
@@ -249,18 +266,18 @@ static void auth_server_receive_message(struct bufferevent *bev, void *ptr)
     if(turn_params.users_params.use_st_credentials) {
       st_password_t pwd;
       if(get_user_pwd(am.username,pwd)<0) {
-	am.success = 0;
+    	  am.success = 0;
       } else {
-	ns_bcopy(pwd,am.pwd,sizeof(st_password_t));
-	am.success = 1;
+    	  ns_bcopy(pwd,am.pwd,sizeof(st_password_t));
+    	  am.success = 1;
       }
     } else {
       hmackey_t key;
       if(get_user_key(am.username,key,am.in_buffer.nbh)<0) {
-	am.success = 0;
+    	  am.success = 0;
       } else {
-	ns_bcopy(key,am.key,sizeof(hmackey_t));
-	am.success = 1;
+    	  ns_bcopy(key,am.key,sizeof(hmackey_t));
+    	  am.success = 1;
       }
     }
     
@@ -271,21 +288,21 @@ static void auth_server_receive_message(struct bufferevent *bev, void *ptr)
     if(dest>=TURNSERVER_ID_BOUNDARY_BETWEEN_TCP_AND_UDP) {
       dest -= TURNSERVER_ID_BOUNDARY_BETWEEN_TCP_AND_UDP;
       if(dest >= get_real_udp_relay_servers_number()) {
-	TURN_LOG_FUNC(
+    	  TURN_LOG_FUNC(
 		      TURN_LOG_LEVEL_ERROR,
 		      "%s: Too large UDP relay number: %d\n",
 		      __FUNCTION__,(int)dest);
       } else {
-	output = bufferevent_get_output(udp_relay_servers[dest]->auth_out_buf);
+    	  output = bufferevent_get_output(udp_relay_servers[dest]->auth_out_buf);
       }
     } else {
       if(dest >= get_real_general_relay_servers_number()) {
-	TURN_LOG_FUNC(
+    	  TURN_LOG_FUNC(
 		      TURN_LOG_LEVEL_ERROR,
 		      "%s: Too large general relay number: %d\n",
 		      __FUNCTION__,(int)dest);
       } else {
-	output = bufferevent_get_output(general_relay_servers[dest]->auth_out_buf);
+    	  output = bufferevent_get_output(general_relay_servers[dest]->auth_out_buf);
       }
     }
     
@@ -758,7 +775,7 @@ static void setup_listener(void)
 	turn_params.listener.udp_services = (dtls_listener_relay_server_type***)allocate_super_memory_engine(turn_params.listener.ioa_eng, sizeof(dtls_listener_relay_server_type**)*turn_params.listener.services_number);
 	turn_params.listener.dtls_services = (dtls_listener_relay_server_type***)allocate_super_memory_engine(turn_params.listener.ioa_eng, sizeof(dtls_listener_relay_server_type**)*turn_params.listener.services_number);
 
-	turn_params.listener.aux_udp_services = (dtls_listener_relay_server_type***)allocate_super_memory_engine(turn_params.listener.ioa_eng, sizeof(dtls_listener_relay_server_type**)*turn_params.aux_servers_list.size+1);
+	turn_params.listener.aux_udp_services = (dtls_listener_relay_server_type***)allocate_super_memory_engine(turn_params.listener.ioa_eng, (sizeof(dtls_listener_relay_server_type**)*turn_params.aux_servers_list.size)+sizeof(void*));
 }
 
 static void setup_barriers(void)
@@ -1393,30 +1410,8 @@ static int run_auth_server_flag = 1;
 
 static void* run_auth_server_thread(void *arg)
 {
-	struct event_base *eb = (struct event_base*)arg;
-
-#if !defined(TURN_NO_THREAD_BARRIERS)
-	if((pthread_barrier_wait(&barrier)<0) && errno)
-		perror("barrier wait");
-#endif
-
 	ignore_sigpipe();
 
-	while(run_auth_server_flag) {
-		run_events(eb);
-		read_userdb_file(0);
-		update_white_and_black_lists();
-		auth_ping();
-#if !defined(TURN_NO_HIREDIS)
-		send_message_to_redis(NULL, "publish", "__XXX__", "__YYY__");
-#endif
-	}
-
-	return arg;
-}
-
-static void setup_auth_server(void)
-{
 	ns_bzero(&turn_params.authserver,sizeof(struct auth_server));
 
 	turn_params.authserver.event_base = turn_event_base_new();
@@ -1433,7 +1428,29 @@ static void setup_auth_server(void)
 	bufferevent_setcb(turn_params.authserver.in_buf, auth_server_receive_message, NULL, NULL, &turn_params.authserver);
 	bufferevent_enable(turn_params.authserver.in_buf, EV_READ);
 
-	if(pthread_create(&(turn_params.authserver.thr), NULL, run_auth_server_thread, turn_params.authserver.event_base)<0) {
+	struct event_base *eb = turn_params.authserver.event_base;
+
+#if !defined(TURN_NO_THREAD_BARRIERS)
+	if((pthread_barrier_wait(&barrier)<0) && errno)
+		perror("barrier wait");
+#endif
+
+	while(run_auth_server_flag) {
+		run_events(eb);
+		read_userdb_file(0);
+		update_white_and_black_lists();
+		auth_ping();
+#if !defined(TURN_NO_HIREDIS)
+		send_message_to_redis(NULL, "publish", "__XXX__", "__YYY__");
+#endif
+	}
+
+	return arg;
+}
+
+static void setup_auth_server(void)
+{
+	if(pthread_create(&(turn_params.authserver.thr), NULL, run_auth_server_thread, NULL)<0) {
 		perror("Cannot create auth thread\n");
 		exit(-1);
 	}

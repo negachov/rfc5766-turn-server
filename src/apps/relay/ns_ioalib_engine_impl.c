@@ -98,6 +98,31 @@ static void close_socket_net_data(ioa_socket_handle s);
 
 /************** Utils **************************/
 
+static void log_socket_event(ioa_socket_handle s, const char *msg, int error) {
+	if(s && (error || (s->e && s->e->verbose))) {
+		if(!msg)
+			msg = "General socket event";
+		turnsession_id id = 0;
+		{
+			ts_ur_super_session *ss = (ts_ur_super_session *) (s->session);
+			if (ss) {
+				id = ss->id;
+			}
+		}
+
+		TURN_LOG_LEVEL ll = TURN_LOG_LEVEL_INFO;
+		if(error)
+			ll = TURN_LOG_LEVEL_ERROR;
+
+		if(EVUTIL_SOCKET_ERROR()) {
+			TURN_LOG_FUNC(ll,"session %018llu: %s: %s\n",(unsigned long long)id,
+											msg, evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
+		} else {
+			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: %s\n",(unsigned long long)id,msg);
+		}
+	}
+}
+
 int set_df_on_ioa_socket(ioa_socket_handle s, int value)
 {
 	if(s->parent_s)
@@ -424,7 +449,7 @@ static void timer_event_handler(evutil_socket_t fd, short what, void* arg)
 	if (!(what & EV_TIMEOUT))
 		return;
 
-	if(eve(te->e->verbose))
+	if(te->e && eve(te->e->verbose))
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "%s: timeout 0x%lx: %s\n", __FUNCTION__,(long)te, te->txt);
 
 	ioa_timer_event_handler cb = te->cb;
@@ -505,9 +530,10 @@ void delete_ioa_timer(ioa_timer_handle th)
 
 static int ioa_socket_check_bandwidth(ioa_socket_handle s, size_t sz)
 {
-	if((s->e->max_bpj == 0) || (s->sat != CLIENT_SOCKET)) {
-		return 1;
-	} else {
+	if((s->e->max_bpj != 0) &&
+			((s->sat == CLIENT_SOCKET)||
+			 (s->sat == TCP_CLIENT_DATA_SOCKET)||
+			 (s->sat == TCP_RELAY_DATA_SOCKET))) {
 		band_limit_t bsz = (band_limit_t)sz;
 		if(s->jiffie != s->e->jiffie) {
 			s->jiffie = s->e->jiffie;
@@ -528,6 +554,8 @@ static int ioa_socket_check_bandwidth(ioa_socket_handle s, size_t sz)
 			}
 		}
 	}
+
+	return 1;
 }
 
 int get_ioa_socket_from_reservation(ioa_engine_handle e, u64bits in_reservation_token, ioa_socket_handle *s)
@@ -1104,7 +1132,7 @@ static void tcp_listener_input_handler(struct evconnlistener *l, evutil_socket_t
 	ioa_addr client_addr;
 	ns_bcopy(sa,&client_addr,socklen);
 
-	addr_debug_print(list_s->e->verbose, &client_addr,"tcp accepted from");
+	addr_debug_print(((list_s->e) && list_s->e->verbose), &client_addr,"tcp accepted from");
 
 	ioa_socket_handle s =
 				create_ioa_socket_from_fd(
@@ -1411,6 +1439,7 @@ static void close_socket_net_data(ioa_socket_handle s)
 					 */
 					SSL_set_shutdown(s->ssl, SSL_RECEIVED_SHUTDOWN);
 					SSL_shutdown(s->ssl);
+					log_socket_event(s, "SSL shutdown received, socket to be closed",0);
 				}
 			}
 			SSL_free(s->ssl);
@@ -1494,8 +1523,8 @@ ioa_socket_handle detach_ioa_socket(ioa_socket_handle s, int full_detach)
 	if (!s) {
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"Detaching NULL socket\n");
 	} else {
-		if(s->done) {
-			TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "!!! %s detach on done socket: 0x%lx, st=%d, sat=%d\n", __FUNCTION__,(long)s, s->st, s->sat);
+		if((s->magic != SOCKET_MAGIC)||(s->done)) {
+			TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "!!! %s detach on bad socket: 0x%lx, st=%d, sat=%d\n", __FUNCTION__,(long)s, s->st, s->sat);
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "!!! %s socket: 0x%lx was closed\n", __FUNCTION__,(long)s);
 			return ret;
 		}
@@ -1721,7 +1750,7 @@ int get_local_mtu_ioa_socket(ioa_socket_handle s)
 		if(s->parent_s)
 			return get_local_mtu_ioa_socket(s->parent_s);
 
-		return get_socket_mtu(s->fd, s->family, eve(s->e->verbose));
+		return get_socket_mtu(s->fd, s->family, (s->e && eve(s->e->verbose)));
 	}
 	return -1;
 }
@@ -2105,7 +2134,7 @@ static int socket_input_worker(ioa_socket_handle s)
 	if(!s)
 		return 0;
 
-	if(s->done) {
+	if((s->magic != SOCKET_MAGIC)||(s->done)) {
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!!%s on socket: 0x%lx, st=%d, sat=%d\n", __FUNCTION__,(long)s, s->st, s->sat);
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s socket: 0x%lx was closed\n", __FUNCTION__,(long)s);
 		return -1;
@@ -2242,6 +2271,7 @@ static int socket_input_worker(ioa_socket_handle s)
 						ret = -1;
 						s->tobeclosed = 1;
 						s->broken = 1;
+						log_socket_event(s, "socket read failed, to be closed",1);
 					} else if(s->st == TLS_SOCKET) {
 #if !defined(TURN_NO_TLS)
 						SSL *ctx = bufferevent_openssl_get_ssl(s->bev);
@@ -2260,11 +2290,13 @@ static int socket_input_worker(ioa_socket_handle s)
 				s->tobeclosed = 1;
 				s->broken = 1;
 				ret = -1;
+				log_socket_event(s, "socket buffer copy failed, to be closed",1);
 			}
 		} else {
 			s->tobeclosed = 1;
 			s->broken = 1;
 			ret = -1;
+			log_socket_event(s, "socket input failed, socket to be closed",1);
 		}
 
 		if(len == 0)
@@ -2275,12 +2307,13 @@ static int socket_input_worker(ioa_socket_handle s)
 		if(s->ssl && (len>0)) { /* DTLS */
 			send_ssl_backlog_buffers(s);
 			elem->buf.len = (size_t)len;
-			ret = ssl_read(s->fd, s->ssl, (ioa_network_buffer_handle)elem, s->e->verbose);
+			ret = ssl_read(s->fd, s->ssl, (ioa_network_buffer_handle)elem, ((s->e) && s->e->verbose));
 			addr_cpy(&remote_addr,&(s->remote_addr));
 			if(ret < 0) {
 				len = -1;
 				s->tobeclosed = 1;
 				s->broken = 1;
+				log_socket_event(s, "SSL read failed, to be closed",0);
 			} else {
 				len = (int)ioa_network_buffer_get_size((ioa_network_buffer_handle)elem);
 			}
@@ -2294,6 +2327,7 @@ static int socket_input_worker(ioa_socket_handle s)
 		s->tobeclosed = 1;
 		s->broken = 1;
 		ret = -1;
+		log_socket_event(s, "socket unknown error, to be closed",1);
 	}
 
 	if ((ret!=-1) && (len >= 0)) {
@@ -2359,9 +2393,9 @@ static void socket_input_handler(evutil_socket_t fd, short what, void* arg)
 	if(!s)
 		return;
 
-	if(s->done) {
+	if((s->magic != SOCKET_MAGIC)||(s->done)) {
 		read_spare_buffer(fd);
-		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!!%s on socket, ev=%d: 0x%lx, st=%d, sat=%d\n", __FUNCTION__,(int)what,(long)s, s->st, s->sat);
+		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!!%s on bad socket, ev=%d: 0x%lx, st=%d, sat=%d\n", __FUNCTION__,(int)what,(long)s, s->st, s->sat);
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s socket: 0x%lx was closed\n", __FUNCTION__,(long)s);
 		return;
 	}
@@ -2374,7 +2408,7 @@ static void socket_input_handler(evutil_socket_t fd, short what, void* arg)
 	if (!ioa_socket_tobeclosed(s))
 		socket_input_worker(s);
 
-	if(s->done) {
+	if((s->magic != SOCKET_MAGIC)||(s->done)) {
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!!%s (1) on socket, ev=%d: 0x%lx, st=%d, sat=%d\n", __FUNCTION__,(int)what,(long)s, s->st, s->sat);
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s socket: 0x%lx was closed\n", __FUNCTION__,(long)s);
 		return;
@@ -2406,7 +2440,7 @@ void close_ioa_socket_after_processing_if_necessary(ioa_socket_handle s)
 				if (server) {
 					s->session = NULL;
 					s->sub_session = NULL;
-					shutdown_client_connection(server, ss, 0);
+					shutdown_client_connection(server, ss, 0, "general");
 				}
 			}
 		}
@@ -2421,7 +2455,7 @@ static void socket_input_handler_bev(struct bufferevent *bev, void* arg)
 
 		ioa_socket_handle s = (ioa_socket_handle) arg;
 
-		if (s->done) {
+		if((s->magic != SOCKET_MAGIC)||(s->done)) {
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!!%s on socket: 0x%lx, st=%d, sat=%d\n", __FUNCTION__, (long) s, s->st, s->sat);
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s socket: 0x%lx was closed\n", __FUNCTION__,(long)s);
 			return;
@@ -2432,7 +2466,7 @@ static void socket_input_handler_bev(struct bufferevent *bev, void* arg)
 				break;
 		}
 
-		if (s->done) {
+		if((s->magic != SOCKET_MAGIC)||(s->done)) {
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!!%s (1) on socket: 0x%lx, st=%d, sat=%d\n", __FUNCTION__, (long) s, s->st, s->sat);
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s socket: 0x%lx was closed\n", __FUNCTION__,(long)s);
 			return;
@@ -2459,7 +2493,7 @@ static void socket_input_handler_bev(struct bufferevent *bev, void* arg)
 					if (server) {
 						s->session=NULL;
 						s->sub_session=NULL;
-						shutdown_client_connection(server, ss, 0);
+						shutdown_client_connection(server, ss, 0, "TCP socket buffer operation error (input handler)");
 					}
 				}
 			}
@@ -2478,6 +2512,16 @@ static void eventcb_bev(struct bufferevent *bev, short events, void *arg)
 		if (arg) {
 			ioa_socket_handle s = (ioa_socket_handle) arg;
 
+			if((s->st != TCP_SOCKET)&&(s->st != TLS_SOCKET)&&(s->st != TENTATIVE_TCP_SOCKET)) {
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s: socket type is wrong on the socket: 0x%lx, st=%d, sat=%d\n",__FUNCTION__,(long)s,s->st,s->sat);
+				return;
+			}
+
+			if(s->magic != SOCKET_MAGIC) {
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s: magic is wrong on the socket: 0x%lx, st=%d, sat=%d\n",__FUNCTION__,(long)s,s->st,s->sat);
+				return;
+			}
+
 			if (s->done) {
 				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s: closed socket: 0x%lx (1): done=%d, fd=%d, br=%d, st=%d, sat=%d, tbc=%d\n", __FUNCTION__, (long) s, (int) s->done,
 								(int) s->fd, s->broken, s->st, s->sat, s->tobeclosed);
@@ -2485,8 +2529,10 @@ static void eventcb_bev(struct bufferevent *bev, short events, void *arg)
 				return;
 			}
 
-			if (events == BEV_EVENT_ERROR)
-				s->broken = 1;
+			if (s->connected && (events & BEV_EVENT_ERROR) && (!(events & BEV_EVENT_EOF))) {
+				log_socket_event(s, "socket connection error",1);
+				return;
+			}
 
 			switch (s->sat){
 			case TCP_CLIENT_DATA_SOCKET:
@@ -2506,13 +2552,26 @@ static void eventcb_bev(struct bufferevent *bev, short events, void *arg)
 				if (ss) {
 					turn_turnserver *server = (turn_turnserver *) ss->server;
 					if (server) {
-						s->session = NULL;
-						s->sub_session = NULL;
-						shutdown_client_connection(server, ss, 0);
+
+
+						{
+							if (events & BEV_EVENT_EOF) {
+								TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: socket closed remotely\n",(unsigned long long)(ss->id));
+								s->session = NULL;
+								s->sub_session = NULL;
+								shutdown_client_connection(server, ss, 0, "TCP connection closed by peer (callback)");
+							} else if (events & BEV_EVENT_ERROR) {
+								TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"session %018llu: socket error: %s\n",(unsigned long long)(ss->id),
+												evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
+								s->session = NULL;
+								s->sub_session = NULL;
+								shutdown_client_connection(server, ss, 0, "TCP socket buffer operation error (callback)");
+							 }
+						}
 					}
 				}
 			}
-			}
+			};
 		}
 	}
 }
@@ -2652,7 +2711,7 @@ static int send_ssl_backlog_buffers(ioa_socket_handle s)
 	if(s) {
 		stun_buffer_list_elem *elem = s->bufs.head;
 		while(elem) {
-			int rc = ssl_send(s, (s08bits*)elem->buf.buf + elem->buf.offset - elem->buf.coffset, (size_t)elem->buf.len, s->e->verbose);
+			int rc = ssl_send(s, (s08bits*)elem->buf.buf + elem->buf.offset - elem->buf.coffset, (size_t)elem->buf.len, ((s->e) && s->e->verbose));
 			if(rc<1)
 				break;
 			++ret;
@@ -2797,6 +2856,7 @@ int send_data_from_ioa_socket_nbh(ioa_socket_handle s, ioa_addr* dest_addr,
 											< 0) {
 								ret = -1;
 								perror("bufev send");
+								log_socket_event(s, "socket write failed, to be closed",1);
 								s->tobeclosed = 1;
 								s->broken = 1;
 							} else {
@@ -2809,7 +2869,7 @@ int send_data_from_ioa_socket_nbh(ioa_socket_handle s, ioa_addr* dest_addr,
 								s,
 								(s08bits*) ioa_network_buffer_data(nbh),
 								ioa_network_buffer_get_size(nbh),
-								s->e->verbose);
+								((s->e) && s->e->verbose));
 						if (ret < 0)
 							s->tobeclosed = 1;
 						else if (ret == 0)
@@ -2979,16 +3039,20 @@ int ioa_socket_tobeclosed(ioa_socket_handle s)
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s socket: 0x%lx was closed\n", __FUNCTION__,(long)s);
 			return 1;
 		}
-		if(s->broken)
+		if(s->broken) {
+			log_socket_event(s, "socket broken", 0);
 			return 1;
-		if(s->tobeclosed)
+		} else if(s->tobeclosed) {
+			log_socket_event(s, "socket to be closed", 0);
 			return 1;
-		if(s->fd < 0) {
+		} else if(s->fd < 0) {
+			log_socket_event(s, "socket fd<0", 0);
 			return 1;
-		}
-		if(s->ssl) {
-			if(SSL_get_shutdown(s->ssl))
+		} else if(s->ssl) {
+			if(SSL_get_shutdown(s->ssl)) {
+				log_socket_event(s, "socket SSL shutdown", 0);
 				return 1;
+			}
 		}
 	}
 	return 0;
@@ -3106,10 +3170,10 @@ void turn_report_allocation_set(void *a, turn_time_t lifetime, int refresh)
 				ioa_engine_handle e = turn_server_get_engine(server);
 				if(e && e->verbose) {
 					if(ss->client_session.s->ssl) {
-						TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"%s: session id=%018llu, username=<%s>, lifetime=%lu, cipher=%s, method=%s (%s)\n", status, (unsigned long long)ss->id, (char*)ss->username, (unsigned long)lifetime, SSL_get_cipher(ss->client_session.s->ssl),
+						TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: %s, username=<%s>, lifetime=%lu, cipher=%s, method=%s (%s)\n", (unsigned long long)ss->id, status, (char*)ss->username, (unsigned long)lifetime, SSL_get_cipher(ss->client_session.s->ssl),
 							turn_get_ssl_method(ss->client_session.s->ssl, ss->client_session.s->orig_ctx_type),ss->client_session.s->orig_ctx_type);
 					} else {
-						TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"%s: session id=%018llu, username=<%s>, lifetime=%lu\n", status, (unsigned long long)ss->id, (char*)ss->username, (unsigned long)lifetime);
+						TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: %s, username=<%s>, lifetime=%lu\n", (unsigned long long)ss->id, status, (char*)ss->username, (unsigned long)lifetime);
 					}
 				}
 			}
@@ -3134,7 +3198,7 @@ void turn_report_allocation_delete(void *a)
 			if(server) {
 				ioa_engine_handle e = turn_server_get_engine(server);
 				if(e && e->verbose) {
-					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"delete: session id=%018llu, username=<%s>\n", (unsigned long long)ss->id, (char*)ss->username);
+					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: delete: username=<%s>\n", (unsigned long long)ss->id, (char*)ss->username);
 				}
 			}
 #if !defined(TURN_NO_HIREDIS)
@@ -3165,7 +3229,7 @@ void turn_report_session_usage(void *session)
 			ioa_engine_handle e = turn_server_get_engine(server);
 			if(((ss->received_packets+ss->sent_packets)&2047)==0) {
 				if(e && e->verbose) {
-					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"usage: session id=%018llu, username=<%s>, rp=%lu, rb=%lu, sp=%lu, sb=%lu\n", (unsigned long long)(ss->id), (char*)ss->username, (unsigned long)(ss->received_packets), (unsigned long)(ss->received_bytes),(unsigned long)(ss->sent_packets),(unsigned long)(ss->sent_bytes));
+					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: usage: username=<%s>, rp=%lu, rb=%lu, sp=%lu, sb=%lu\n", (unsigned long long)(ss->id), (char*)ss->username, (unsigned long)(ss->received_packets), (unsigned long)(ss->received_bytes),(unsigned long)(ss->sent_packets),(unsigned long)(ss->sent_bytes));
 				}
 #if !defined(TURN_NO_HIREDIS)
 				if(default_async_context_is_not_empty()) {
@@ -3235,6 +3299,7 @@ static void init_super_memory_region(super_memory_t *r)
 	if(r) {
 		ns_bzero(r,sizeof(super_memory_t));
 		r->super_memory = (char*)malloc(TURN_SM_SIZE);
+		ns_bzero(r->super_memory,TURN_SM_SIZE);
 		pthread_mutex_init(&r->mutex_sm, NULL);
 		r->sm_allocated = 0;
 		r->sm_total_sz = TURN_SM_SIZE;
@@ -3293,7 +3358,7 @@ void* allocate_super_memory_region_func(super_memory_t *r, size_t size, const ch
 			if(r->sm_chunk || !(r->id))
 				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"(%s:%s:%d): allocated super memory: region id = %u, chunk=%lu, total=%lu, allocated=%lu, want=%lu\n",file,func,line,(unsigned int)r->id, (unsigned long)r->sm_chunk, (unsigned long)r->sm_total_sz, (unsigned long)r->sm_allocated,(unsigned long)size);
 
-			char* ptr = r->super_memory + r->sm_total_sz - r->sm_allocated - size;
+			char* ptr = r->super_memory + r->sm_allocated;
 
 			ns_bzero(ptr, size);
 
