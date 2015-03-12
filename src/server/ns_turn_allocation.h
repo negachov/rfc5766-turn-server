@@ -92,7 +92,7 @@ typedef struct {
 	ioa_network_buffer_handle *bufs;
 } unsent_buffer;
 
-typedef struct
+struct _tcp_connection
 {
 	TC_STATE state;
 	tcp_connection_id id;
@@ -105,7 +105,7 @@ typedef struct
 	void *owner; //a
 	int done;
 	unsent_buffer ub_to_client;
-} tcp_connection;
+};
 
 typedef struct _tcp_connection_list {
 	size_t sz;
@@ -127,6 +127,7 @@ typedef struct _ch_info {
   turn_time_t expiration_time;
   ioa_timer_handle lifetime_ev;
   void *owner; //perm
+  TURN_CHANNEL_HANDLER_KERNEL kernel_channel;
 } ch_info;
 
 ///////////// "channel" map /////////////////////
@@ -156,6 +157,8 @@ typedef struct _turn_permission_info {
 	turn_time_t expiration_time;
 	ioa_timer_handle lifetime_ev;
 	void* owner; //a
+	int verbose;
+	unsigned long long session_id;
 } turn_permission_info;
 
 typedef struct _turn_permission_slot {
@@ -216,6 +219,7 @@ ts_ur_session *get_relay_session(allocation *a);
 ioa_socket_handle get_relay_socket(allocation *a);
 
 tcp_connection *get_and_clean_tcp_connection_by_id(ur_map *map, tcp_connection_id id);
+tcp_connection *get_tcp_connection_by_id(ur_map *map, tcp_connection_id id);
 tcp_connection *get_tcp_connection_by_peer(allocation *a, ioa_addr *peer_addr);
 int can_accept_tcp_connection_from_peer(allocation *a, ioa_addr *peer_addr, int server_relay);
 tcp_connection *create_tcp_connection(u08bits server_id, allocation *a, stun_tid *tid, ioa_addr *peer_addr, int *err_code);

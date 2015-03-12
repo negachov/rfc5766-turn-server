@@ -36,6 +36,8 @@
 #include "session.h"
 
 #include <openssl/ssl.h>
+#include <openssl/dh.h>
+#include <openssl/bn.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,8 +45,8 @@ extern "C" {
 
 //////////////////////////////////////////////
 
-#define STOPPING_TIME (5)
-#define STARTING_TCP_RELAY_TIME (10)
+#define STOPPING_TIME (10)
+#define STARTING_TCP_RELAY_TIME (30)
 
 extern int clmessage_length;
 extern int do_not_use_channel;
@@ -62,6 +64,8 @@ extern int default_address_family;
 extern int dont_fragment;
 extern u08bits g_uname[STUN_MAX_USERNAME_SIZE+1];
 extern st_password_t g_upwd;
+extern char g_auth_secret[1025];
+extern int g_use_auth_secret_with_timestamp;
 extern int use_fingerprints;
 extern SSL_CTX *root_tls_ctx[32];
 extern int root_tls_ctx_num;
@@ -74,6 +78,7 @@ extern int mandatory_channel_padding;
 extern int negative_test;
 extern int negative_protocol_test;
 extern int dos;
+extern int random_disconnect;
 extern SHATYPE shatype;
 extern int mobility;
 extern int no_permissions;
@@ -86,13 +91,15 @@ void start_mclient(const char *remote_address, int port,
 		   int messagenumber, int mclient);
 
 int send_buffer(app_ur_conn_info *clnet_info, stun_buffer* message, int data_connection, app_tcp_conn_info *atc);
-int recv_buffer(app_ur_conn_info *clnet_info, stun_buffer* message, int sync, app_tcp_conn_info *atc);
+int recv_buffer(app_ur_conn_info *clnet_info, stun_buffer* message, int sync, int data_connection, app_tcp_conn_info *atc, stun_buffer* request_message);
 
 void client_input_handler(evutil_socket_t fd, short what, void* arg);
 
 turn_credential_type get_turn_credentials_type(void);
 
 int add_integrity(app_ur_conn_info *clnet_info, stun_buffer *message);
+
+void recalculate_restapi_hmac(void);
 
 ////////////////////////////////////////////
 

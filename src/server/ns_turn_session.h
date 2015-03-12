@@ -48,7 +48,7 @@ typedef u64bits turnsession_id;
 
 typedef u64bits mobile_id_t;
 
-typedef struct {
+struct _ts_ur_super_session {
   void* server; 
   turnsession_id id;
   turn_time_t start_time;
@@ -65,7 +65,7 @@ typedef struct {
   int enforce_fingerprints;
   int is_tcp_relay;
   int to_be_closed;
-  SHATYPE shatype;
+  int quota_used;
   /* Stats */
   u32bits received_packets;
   u32bits sent_packets;
@@ -81,8 +81,9 @@ typedef struct {
   /* Mobile */
   int is_mobile;
   mobile_id_t mobile_id;
+  mobile_id_t old_mobile_id;
   char s_mobile_id[33];
-} ts_ur_super_session;
+};
 
 ////// Session info for statistics //////
 
@@ -108,7 +109,6 @@ struct turn_session_info {
 	addr_data relay_addr_data;
 	u08bits username[STUN_MAX_USERNAME_SIZE+1];
 	int enforce_fingerprints;
-	SHATYPE shatype;
 /* Stats */
 	u64bits received_packets;
 	u64bits sent_packets;

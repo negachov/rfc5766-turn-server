@@ -63,6 +63,8 @@ int default_address_family = STUN_ATTRIBUTE_REQUESTED_ADDRESS_FAMILY_VALUE_DEFAU
 int dont_fragment = 0;
 u08bits g_uname[STUN_MAX_USERNAME_SIZE+1];
 st_password_t g_upwd;
+char g_auth_secret[1025]="\0";
+int g_use_auth_secret_with_timestamp = 0;
 int use_fingerprints = 1;
 
 static char ca_cert_file[1025]="";
@@ -79,6 +81,7 @@ int mandatory_channel_padding = 0;
 int negative_test = 0;
 int negative_protocol_test = 0;
 int dos = 0;
+int random_disconnect = 0;
 
 SHATYPE shatype = SHATYPE_SHA1;
 
@@ -117,15 +120,15 @@ static char Usage[] =
   "		Without this option, by default, SHA1 is used.\n"
   "	-M	ICE Mobility engaged.\n"
   "	-I	Do not set permissions on TURN relay endpoints\n"
-  "     	(for testing the non-standard server relay functionality).\n"
+  "		(for testing the non-standard server relay functionality).\n"
   "	-G	Generate extra requests (create permissions, channel bind).\n"
+  " -B  Random disconnect after a few initial packets.\n"
   "Options:\n"
   "	-l	Message length (Default: 100 Bytes).\n"
   "	-i	Certificate file (for secure connections only, optional).\n"
   "	-k	Private key file (for secure connections only).\n"
   "	-E	CA file for server certificate verification, \n"
   "		if the server certificate to be verified.\n"
-  "	-F	Cipher suite for TLS/DTLS. Default value is DEFAULT.\n"
   "	-p	TURN server port (Default: 3478 unsecure, 5349 secure).\n"
   "	-n	Number of messages to send (Default: 5).\n"
   "	-d	Local interface device (optional).\n"
@@ -137,9 +140,38 @@ static char Usage[] =
   "	-u	STUN/TURN user name.\n"
   "	-w	STUN/TURN user password.\n"
   "	-W	TURN REST API authentication secret. Is not compatible with -A option.\n"
-  "	-C	TURN REST API username/timestamp separator symbol (character). The default value is ':'.\n";
+  "	-C	TURN REST API timestamp/username separator symbol (character). The default value is ':'.\n"
+  "	-F	<cipher-suite> Cipher suite for TLS/DTLS. Default value is DEFAULT.\n";
 
 //////////////////////////////////////////////////
+
+void recalculate_restapi_hmac(void) {
+
+	if (g_use_auth_secret_with_timestamp) {
+
+		u08bits hmac[MAXSHASIZE];
+		unsigned int hmac_len;
+
+		hmac_len = SHA256SIZEBYTES;
+
+		hmac[0] = 0;
+
+		if (stun_calculate_hmac(g_uname, strlen((char*) g_uname),
+				(u08bits*) g_auth_secret, strlen(g_auth_secret), hmac,
+				&hmac_len, SHATYPE_SHA256) >= 0) {
+			size_t pwd_length = 0;
+			char *pwd = base64_encode(hmac, hmac_len, &pwd_length);
+
+			if (pwd) {
+				if (pwd_length > 0) {
+					ns_bcopy(pwd,g_upwd,pwd_length);
+					g_upwd[pwd_length] = 0;
+				}
+			}
+			turn_free(pwd,strlen(pwd)+1);
+		}
+	}
+}
 
 int main(int argc, char **argv)
 {
@@ -151,9 +183,7 @@ int main(int argc, char **argv)
 	char peer_address[129] = "\0";
 	int peer_port = PEER_DEFAULT_PORT;
 
-	int use_auth_secret_with_timestamp = 0;
 	char rest_api_separator = ':';
-	char auth_secret[1025]="\0";
 	int use_null_cipher=0;
 
 	set_logfile("stdout");
@@ -164,8 +194,11 @@ int main(int argc, char **argv)
 
 	ns_bzero(local_addr, sizeof(local_addr));
 
-	while ((c = getopt(argc, argv, "d:p:l:n:L:m:e:r:u:w:i:k:z:W:C:E:F:vsyhcxXgtTSAPDNOUHMRIG")) != -1) {
+	while ((c = getopt(argc, argv, "d:p:l:n:L:m:e:r:u:w:i:k:z:W:C:E:F:vsyhcxXgtTSAPDNOUHMRIGB")) != -1) {
 		switch (c){
+		case 'B':
+			random_disconnect = 1;
+			break;
 		case 'G':
 			extra_requests = 1;
 			break;
@@ -272,6 +305,7 @@ int main(int argc, char **argv)
 		case 'P':
 			passive_tcp = 1;
 			/* implies 'T': */
+			/* no break */
 		case 'T':
 			relay_transport = STUN_ATTRIBUTE_TRANSPORT_TCP_VALUE;
 			break;
@@ -283,8 +317,8 @@ int main(int argc, char **argv)
 			use_secure = 1;
 			break;
 		case 'W':
-			use_auth_secret_with_timestamp = 1;
-			STRCPY(auth_secret,optarg);
+			g_use_auth_secret_with_timestamp = 1;
+			STRCPY(g_auth_secret,optarg);
 			break;
 		case 'i':
 		{
@@ -314,7 +348,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if(use_auth_secret_with_timestamp) {
+	if(g_use_auth_secret_with_timestamp) {
 
 		if(use_short_term) {
 			fprintf(stderr,"ERROR: You cannot use authentication secret (REST API) with short-term credentials mechanism.\n");
@@ -322,7 +356,7 @@ int main(int argc, char **argv)
 		}
 		{
 			char new_uname[1025];
-			const unsigned long exp_time = 600; /* one day */
+			const unsigned long exp_time = 3600 * 24; /* one day */
 			if(g_uname[0]) {
 			  snprintf(new_uname,sizeof(new_uname),"%lu%c%s",(unsigned long)time(NULL) + exp_time,rest_api_separator, (char*)g_uname);
 			} else {
@@ -344,7 +378,7 @@ int main(int argc, char **argv)
 
 			hmac[0]=0;
 
-			if(stun_calculate_hmac(g_uname, strlen((char*)g_uname), (u08bits*)auth_secret, strlen(auth_secret), hmac, &hmac_len, shatype)>=0) {
+			if(stun_calculate_hmac(g_uname, strlen((char*)g_uname), (u08bits*)g_auth_secret, strlen(g_auth_secret), hmac, &hmac_len, shatype)>=0) {
 				size_t pwd_length = 0;
 				char *pwd = base64_encode(hmac,hmac_len,&pwd_length);
 
@@ -403,18 +437,13 @@ int main(int argc, char **argv)
 		SSL_load_error_strings();
 		OpenSSL_add_ssl_algorithms();
 
-		const char *csuite = "ALL:SSLv2"; //"AES256-SHA" "DH"
+		const char *csuite = "ALL"; //"AES256-SHA" "DH"
 		if(use_null_cipher)
 			csuite = "eNULL";
 		else if(cipher_suite[0])
 			csuite=cipher_suite;
 
 		if(use_tcp) {
-#ifndef OPENSSL_NO_SSL2
-		  root_tls_ctx[root_tls_ctx_num] = SSL_CTX_new(SSLv2_client_method());
-		  SSL_CTX_set_cipher_list(root_tls_ctx[root_tls_ctx_num], csuite);
-		  root_tls_ctx_num++;
-#endif
 		  root_tls_ctx[root_tls_ctx_num] = SSL_CTX_new(SSLv23_client_method());
 		  SSL_CTX_set_cipher_list(root_tls_ctx[root_tls_ctx_num], csuite);
 		  root_tls_ctx_num++;

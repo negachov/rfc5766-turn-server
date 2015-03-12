@@ -49,7 +49,7 @@ NULL,
 
 SHATYPE_SHA1, DH_1066, "", DEFAULT_EC_CURVE_NAME, "",
 "turn_server_cert.pem","turn_server_pkey.pem", "", "",
-0,0,0,0,0,
+0,0,0,0,
 #if defined(TURN_NO_TLS)
 1,
 #else
@@ -67,14 +67,9 @@ TURN_VERBOSE_NONE,0,0,0,0,0,0,0,
 DEFAULT_STUN_PORT,DEFAULT_STUN_TLS_PORT,0,0,1,
 0,0,0,0,
 "",
-#if !defined(TURN_NO_HIREDIS)
 "",0,
-#endif
 {
-  NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,0,NULL,NULL,NULL
-#if !defined(TURN_NO_HIREDIS)
-,NULL
-#endif
+  NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,0,NULL,NULL,NULL,NULL
 },
 {NULL, NULL, 0},{NULL, NULL, 0},
 NEV_UNKNOWN, 
@@ -363,7 +358,8 @@ static char Usage[] = "Usage: turnserver [options]\n"
 " -X, --external-ip  <public-ip[/private-ip]>	TURN Server public/private address mapping, if the server is behind NAT.\n"
 "						In that situation, if a -X is used in form \"-X ip\" then that ip will be reported\n"
 "						as relay IP address of all allocations. This scenario works only in a simple case\n"
-"						when one single relay address is be used, and no STUN CHANGE_REQUEST functionality is required.\n"
+"						when one single relay address is be used, and no STUN CHANGE_REQUEST\n"
+"						functionality is required.\n"
 "						That single relay address must be mapped by NAT to the 'external' IP.\n"
 "						For that 'external' IP, NAT must forward ports directly (relayed port 12345\n"
 "						must be always mapped to the same 'external' port 12345).\n"
@@ -374,7 +370,8 @@ static char Usage[] = "Usage: turnserver [options]\n"
 " --no-multicast-peers				Disallow peers on well-known broadcast addresses (224.0.0.0 and above, and FFXX:*).\n"
 " -m, --relay-threads		<number>	Number of relay threads to handle the established connections\n"
 "						(in addition to authentication thread and the listener thread).\n"
-"						If set to 0 then application runs in single-threaded mode.\n"
+"						If explicitly set to 0 then application runs in single-threaded mode.\n"
+"						If not set then the default threading policy will be employed.\n"
 "						The default thread number is the number of CPUs.\n"
 "						In older systems (pre-Linux 3.9) the number of UDP relay threads always equals\n"
 "						the number of listening endpoints (unless -m 0 is set).\n"
@@ -396,8 +393,10 @@ static char Usage[] = "Usage: turnserver [options]\n"
 " -r, --realm			<realm>		Realm, for long-term credentials and for TURN REST API.\n"
 " -q, --user-quota		<number>	Per-user allocation quota: how many concurrent allocations a user can create.\n"
 " -Q, --total-quota		<number>	Total allocations quota: global limit on concurrent allocations.\n"
-" -s, --max-bps			<number>	Max bytes-per-second bandwidth a TURN session is allowed to handle.\n"
-"						(input and output network streams combined).\n"
+" -s, --max-bps			<number>	Max bytes-per-second bandwidth a TURN session is allowed to handle\n"
+"						(input and output network streams are treated separately). Anything above\n"
+"						that limit will be dropped or temporary suppressed\n"
+"						(within the available buffer limits).\n"
 " -c				<filename>	Configuration file name (default - turnserver.conf).\n"
 " -b, --userdb			<filename>	User database file name (default - turnuserdb.conf) for long-term credentials only.\n"
 #if !defined(TURN_NO_PQ)
@@ -414,16 +413,20 @@ static char Usage[] = "Usage: turnserver [options]\n"
 "	                                	This database can be used for long-term and short-term credentials mechanisms,\n"
 "		                                and it can store the secret value(s) for secret-based timed authentication in TURN RESP API.\n"
 "						The connection string my be space-separated list of parameters:\n"
-"	        	          		\"host=<ip-addr> dbname=<database-name> user=<database-user> \\\n								password=<database-user-password> port=<db-port> connect_timeout=<seconds>\".\n"
-"	        	          		All parameters are optional.\n"
+"	        	          		\"host=<ip-addr> dbname=<database-name> user=<database-user> \\\n								password=<database-user-password> port=<db-port> connect_timeout=<seconds>\".\n\n"
+"						The connection string parameters for the secure communications (SSL):\n"
+"						ca, capath, cert, key, cipher\n"
+"						(see http://dev.mysql.com/doc/refman/5.1/en/ssl-options.html for the \n"
+"						command options description).\n\n"
+"	        	          		All connection-string parameters are optional.\n\n"
 #endif
 #if !defined(TURN_NO_HIREDIS)
 " -N, --redis-userdb	<connection-string>	Redis user database connection string, if used (default - empty, no Redis DB used).\n"
 "	                                	This database can be used for long-term and short-term credentials mechanisms,\n"
 "		                                and it can store the secret value(s) for secret-based timed authentication in TURN RESP API.\n"
 "						The connection string my be space-separated list of parameters:\n"
-"	        	          		\"host=<ip-addr> dbname=<db-number> \\\n								password=<database-user-password> port=<db-port> connect_timeout=<seconds>\".\n"
-"	        	          		All parameters are optional.\n"
+"	        	          		\"host=<ip-addr> dbname=<db-number> \\\n								password=<database-user-password> port=<db-port> connect_timeout=<seconds>\".\n\n"
+"	        	          		All connection-string parameters are optional.\n\n"
 " -O, --redis-statsdb	<connection-string>	Redis status and statistics database connection string, if used \n"
 "						(default - empty, no Redis stats DB used).\n"
 "	                                	This database keeps allocations status information, and it can be also used for publishing\n"
@@ -459,7 +462,6 @@ static char Usage[] = "Usage: turnserver [options]\n"
 " --dh2066					Use 2066 bits predefined DH TLS key. Default size of the predefined key is 1066.\n"
 " --dh-file	<dh-file-name>			Use custom DH TLS key, stored in PEM format in the file.\n"
 "						Flags --dh566 and --dh2066 are ignored when the DH key is taken from a file.\n"
-" --no-sslv2					Do not allow SSLv2 protocol.\n"
 " --no-sslv3					Do not allow SSLv3 protocol.\n"
 " --no-tlsv1					Do not allow TLSv1 protocol.\n"
 " --no-tlsv1_1					Do not allow TLSv1.1 protocol.\n"
@@ -482,6 +484,9 @@ static char Usage[] = "Usage: turnserver [options]\n"
 "						a log file. With this option everything will be going to the log file only\n"
 "						(unless the log file itself is stdout).\n"
 " --syslog					Output all log information into the system log (syslog), do not use the file output.\n"
+" --simple-log					This flag means that no log file rollover will be used, and the log file\n"
+"						name will be constructed as-is, without PID and date appendage.\n"
+"						This option can be used, for example, together with the logrotate tool.\n"
 " --stale-nonce					Use extra security with nonce value having limited lifetime (600 secs).\n"
 " -S, --stun-only				Option to set standalone STUN operation only, all TURN requests will be ignored.\n"
 "     --no-stun					Option to suppress STUN functionality, only TURN requests will be processed.\n"
@@ -491,7 +496,7 @@ static char Usage[] = "Usage: turnserver [options]\n"
 " --tls-alternate-server	<ip:port>		Set the TURN server to redirect the allocate requests (DTLS and TLS services).\n"
 "						Multiple alternate-server options can be set for load balancing purposes.\n"
 "						See the docs for more information.\n"
-" -C, --rest-api-separator	<SYMBOL>	This is the username/timestamp separator symbol (character) in TURN REST API.\n"
+" -C, --rest-api-separator	<SYMBOL>	This is the timestamp/username separator symbol (character) in TURN REST API.\n"
 "						The default value is ':'.\n"
 "     --max-allocate-timeout=<seconds>		Max time, in seconds, allowed for full allocation establishment. Default is 60.\n"
 "     --allowed-peer-ip=<ip[-ip]> 		Specifies an ip or range of ips that are explicitly allowed to connect to the \n"
@@ -504,9 +509,8 @@ static char Usage[] = "Usage: turnserver [options]\n"
 " --secure-stun					Require authentication of the STUN Binding request.\n"
 "						By default, the clients are allowed anonymous access to the STUN Binding functionality.\n"
 " --sha256					Require SHA256 digest function to be used for the message integrity.\n"
-"						By default, the server accepts both SHA1 (as per TURN standard specs)\n"
-"						and SHA256 (as an extension) functions and the server switches to SHA256\n"
-"						only if the client session uses it. With this option, the server always\n"
+"						By default, the server SHA1 (as per TURN standard specs).\n"
+"						With this option, the server\n"
 "						requires the stronger SHA256 function. The client application must\n"
 "						support SHA256 hash function if this option is used. If the server obtains\n"
 "						a message from the client with a weaker (SHA1) hash function then the server\n"
@@ -546,7 +550,7 @@ static char AdminUsage[] = "Usage: turnadmin [command] [options]\n"
 	"	-D, --delete-st			delete a short-term mechanism user\n"
 	"	-l, --list			list all long-term mechanism users\n"
 	"	-L, --list-st			list all short-term mechanism users\n"
-#if !defined(TURN_NO_PQ) || !defined(TURN_NO_MYSQL)
+#if !defined(TURN_NO_PQ) || !defined(TURN_NO_MYSQL) || !defined(TURN_NO_HIREDIS)
 	"	-s, --set-secret=<value>	Add shared secret for TURN RESP API\n"
 	"	-S, --show-secret		Show stored shared secrets for TURN REST API\n"
 	"	-X, --delete-secret=<value>	Delete a shared secret\n"
@@ -566,11 +570,13 @@ static char AdminUsage[] = "Usage: turnadmin [command] [options]\n"
 	"	-u, --user			Username\n"
 	"	-r, --realm			Realm for long-term mechanism only\n"
 	"	-p, --password			Password\n"
+	"	-H, --sha256			Use SHA256 digest function to be used for the message integrity.\n"
+	"					By default, the server SHA1 (as per TURN standard specs).\n"
 	"	-h, --help			Help\n";
 
 #define OPTIONS "c:d:p:L:E:X:i:m:l:r:u:b:e:M:N:O:q:Q:s:C:vVofhznaAS"
 
-#define ADMIN_OPTIONS "lLkaADSdb:e:M:N:u:r:p:s:X:h"
+#define ADMIN_OPTIONS "HlLkaADSdb:e:M:N:u:r:p:s:X:h"
 
 enum EXTRA_OPTS {
 	NO_UDP_OPT=256,
@@ -594,6 +600,7 @@ enum EXTRA_OPTS {
 	AUTH_SECRET_TS_EXP, /* deprecated */
 	NO_STDOUT_LOG_OPT,
 	SYSLOG_OPT,
+	SIMPLE_LOG_OPT,
 	AUX_SERVER_OPT,
 	UDP_SELF_BALANCE_OPT,
 	ALTERNATE_SERVER_OPT,
@@ -623,14 +630,29 @@ enum EXTRA_OPTS {
 	DH566_OPT,
 	DH2066_OPT,
 	NE_TYPE_OPT,
-	NO_SSLV2_OPT,
+	NO_SSLV2_OPT, /*deprecated */
 	NO_SSLV3_OPT,
 	NO_TLSV1_OPT,
 	NO_TLSV1_1_OPT,
 	NO_TLSV1_2_OPT
 };
 
-static struct option long_options[] = {
+struct myoption {
+        const char *name;     /* name of long option */
+        int has_arg;    /* whether option takes an argument */
+        int *flag;      /* if not NULL, set *flag to val when option found */
+        int val;        /* if flag is not NULL, value to set *flag to. */
+                        /* if flag is NULL, return value */
+};
+
+struct uoptions {
+	union {
+		const struct myoption *m;
+		const struct option *o;
+	} u;
+};
+
+static const struct myoption long_options[] = {
 				{ "listening-device", required_argument, NULL, 'd' },
 				{ "listening-port", required_argument, NULL, 'p' },
 				{ "tls-listening-port", required_argument, NULL, TLS_PORT_OPT },
@@ -685,6 +707,7 @@ static struct option long_options[] = {
 				{ "log-file", required_argument, NULL, 'l' },
 				{ "no-stdout-log", optional_argument, NULL, NO_STDOUT_LOG_OPT },
 				{ "syslog", optional_argument, NULL, SYSLOG_OPT },
+				{ "simple-log", optional_argument, NULL, SIMPLE_LOG_OPT },
 				{ "aux-server", required_argument, NULL, AUX_SERVER_OPT },
 				{ "udp-self-balance", optional_argument, NULL, UDP_SELF_BALANCE_OPT },
 				{ "alternate-server", required_argument, NULL, ALTERNATE_SERVER_OPT },
@@ -714,7 +737,7 @@ static struct option long_options[] = {
 				{ "dh566", optional_argument, NULL, DH566_OPT },
 				{ "dh2066", optional_argument, NULL, DH2066_OPT },
 				{ "ne", required_argument, NULL, NE_TYPE_OPT },
-				{ "no-sslv2", optional_argument, NULL, NO_SSLV2_OPT },
+				{ "no-sslv2", optional_argument, NULL, NO_SSLV2_OPT }, /* deprecated */
 				{ "no-sslv3", optional_argument, NULL, NO_SSLV3_OPT },
 				{ "no-tlsv1", optional_argument, NULL, NO_TLSV1_OPT },
 				{ "no-tlsv1_1", optional_argument, NULL, NO_TLSV1_1_OPT },
@@ -722,13 +745,13 @@ static struct option long_options[] = {
 				{ NULL, no_argument, NULL, 0 }
 };
 
-static struct option admin_long_options[] = {
+static const struct myoption admin_long_options[] = {
 				{ "key", no_argument, NULL, 'k' },
 				{ "add", no_argument, NULL, 'a' },
 				{ "delete", no_argument, NULL, 'd' },
 				{ "list", no_argument, NULL, 'l' },
 				{ "list-st", no_argument, NULL, 'L' },
-#if !defined(TURN_NO_PQ) || !defined(TURN_NO_MYSQL)
+#if !defined(TURN_NO_PQ) || !defined(TURN_NO_MYSQL) || !defined(TURN_NO_HIREDIS)
 				{ "set-secret", required_argument, NULL, 's' },
 				{ "show-secret", no_argument, NULL, 'S' },
 				{ "delete-secret", required_argument, NULL, 'X' },
@@ -750,6 +773,7 @@ static struct option admin_long_options[] = {
 				{ "user", required_argument, NULL, 'u' },
 				{ "realm", required_argument, NULL, 'r' },
 				{ "password", required_argument, NULL, 'p' },
+				{ "sha256", no_argument, NULL, 'H' },
 				{ "help", no_argument, NULL, 'h' },
 				{ NULL, no_argument, NULL, 0 }
 };
@@ -774,7 +798,7 @@ static void set_option(int c, char *value)
 
   switch (c) {
   case NO_SSLV2_OPT:
-	  turn_params.no_sslv2 = get_bool_value(value);
+	  //deprecated
 	  break;
   case NO_SSLV3_OPT:
 	  turn_params.no_sslv3 = get_bool_value(value);
@@ -933,7 +957,7 @@ static void set_option(int c, char *value)
 		if(value) {
 			char *div = strchr(value,'/');
 			if(div) {
-				char *nval=strdup(value);
+				char *nval=turn_strdup(value);
 				div = strchr(nval,'/');
 				div[0]=0;
 				++div;
@@ -1056,7 +1080,7 @@ static void set_option(int c, char *value)
 		turn_params.users_params.users.total_quota = atoi(value);
 		break;
 	case 's':
-		turn_params.max_bps = (band_limit_t)atol(value);
+		turn_params.max_bps = (band_limit_t)strtoul(value,NULL,10);
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "%lu bytes per second allowed per session\n",(unsigned long)turn_params.max_bps);
 		break;
 	case NO_UDP_OPT:
@@ -1133,6 +1157,7 @@ static void set_option(int c, char *value)
 	case 'l':
 	case NO_STDOUT_LOG_OPT:
 	case SYSLOG_OPT:
+	case SIMPLE_LOG_OPT:
 	case 'c':
 	case 'n':
 	case 'h':
@@ -1255,6 +1280,8 @@ static void read_config_file(int argc, char **argv, int pass)
 						set_no_stdout_log(get_bool_value(value));
 					} else if((pass==0) && (c==SYSLOG_OPT)) {
 						set_log_to_syslog(get_bool_value(value));
+					} else if((pass==0) && (c==SIMPLE_LOG_OPT)) {
+						set_simple_log(get_bool_value(value));
 					} else if((pass == 0) && (c != 'u')) {
 					  set_option(c, value);
 					} else if((pass > 0) && (c == 'u')) {
@@ -1283,7 +1310,10 @@ static int adminmain(int argc, char **argv)
 	u08bits pwd[STUN_MAX_PWD_SIZE+1]="";
 	u08bits secret[AUTH_SECRET_SIZE+1]="";
 
-	while (((c = getopt_long(argc, argv, ADMIN_OPTIONS, admin_long_options, NULL)) != -1)) {
+	struct uoptions uo;
+	uo.u.m = admin_long_options;
+
+	while (((c = getopt_long(argc, argv, ADMIN_OPTIONS, uo.u.o, NULL)) != -1)) {
 		switch (c){
 		case 'k':
 			ct = TA_PRINT_KEY;
@@ -1309,7 +1339,7 @@ static int adminmain(int argc, char **argv)
 			ct = TA_LIST_USERS;
 			is_st = 1;
 			break;
-#if !defined(TURN_NO_PQ) || !defined(TURN_NO_MYSQL)
+#if !defined(TURN_NO_PQ) || !defined(TURN_NO_MYSQL) || !defined(TURN_NO_HIREDIS)
 		case 's':
 			ct = TA_SET_SECRET;
 			STRCPY(secret,optarg);
@@ -1368,6 +1398,12 @@ static int adminmain(int argc, char **argv)
 				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Wrong password: %s\n",pwd);
 				exit(-1);
 			}
+			break;
+		case 'H':
+			if(get_bool_value(optarg))
+				turn_params.shatype = SHATYPE_SHA256;
+			else
+				turn_params.shatype = SHATYPE_SHA1;
 			break;
 		case 'h':
 			printf("\n%s\n", AdminUsage);
@@ -1456,9 +1492,9 @@ static void print_features(unsigned long mfn)
 #endif
 
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L
-	TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "OpenSSL version: fresh enough\n");
+	TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "OpenSSL compile-time version 0x%llx: fresh enough\n",(unsigned long long)OPENSSL_VERSION_NUMBER);
 #else
-	TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "OpenSSL version: antique\n");
+	TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "OpenSSL compile-time version 0x%llx version: antique\n",(unsigned long long)OPENSSL_VERSION_NUMBER);
 #endif
 
 	TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "Default Net Engine version: %d (%s)\n\n=====================================================\n\n", (int)turn_params.net_engine_version, turn_params.net_engine_version_txt[(int)turn_params.net_engine_version]);
@@ -1543,7 +1579,11 @@ int main(int argc, char **argv)
 	init_dynamic_ip_lists();
 
 	if (!strstr(argv[0], "turnadmin")) {
-		while (((c = getopt_long(argc, argv, OPTIONS, long_options, NULL)) != -1)) {
+
+		struct uoptions uo;
+		uo.u.m = long_options;
+
+		while (((c = getopt_long(argc, argv, OPTIONS, uo.u.o, NULL)) != -1)) {
 			switch (c){
 			case 'l':
 				set_logfile(optarg);
@@ -1553,6 +1593,9 @@ int main(int argc, char **argv)
 				break;
 			case SYSLOG_OPT:
 				set_log_to_syslog(get_bool_value(optarg));
+				break;
+			case SIMPLE_LOG_OPT:
+				set_simple_log(get_bool_value(optarg));
 				break;
 			default:
 				;
@@ -1587,8 +1630,8 @@ int main(int argc, char **argv)
 
 	ns_bzero(&turn_params.users_params.users,sizeof(turn_user_db));
 	turn_params.users_params.users.ct = TURN_CREDENTIALS_NONE;
-	turn_params.users_params.users.static_accounts = ur_string_map_create(free);
-	turn_params.users_params.users.dynamic_accounts = ur_string_map_create(free);
+	turn_params.users_params.users.static_accounts = ur_string_map_create(turn_free_simple);
+	turn_params.users_params.users.dynamic_accounts = ur_string_map_create(turn_free_simple);
 	turn_params.users_params.users.alloc_counters = ur_string_map_create(NULL);
 
 	if(strstr(argv[0],"turnadmin"))
@@ -1602,7 +1645,10 @@ int main(int argc, char **argv)
 
 	read_config_file(argc,argv,0);
 
-	while (((c = getopt_long(argc, argv, OPTIONS, long_options, NULL)) != -1)) {
+	struct uoptions uo;
+	uo.u.m = long_options;
+
+	while (((c = getopt_long(argc, argv, OPTIONS, uo.u.o, NULL)) != -1)) {
 		if(c != 'u')
 			set_option(c,optarg);
 	}
@@ -1611,7 +1657,7 @@ int main(int argc, char **argv)
 
 	optind = 0;
 
-	while (((c = getopt_long(argc, argv, OPTIONS, long_options, NULL)) != -1)) {
+	while (((c = getopt_long(argc, argv, OPTIONS, uo.u.o, NULL)) != -1)) {
 	  if(c == 'u') {
 	    set_option(c,optarg);
 	  }
@@ -1703,7 +1749,7 @@ int main(int argc, char **argv)
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "===========Discovering listener addresses: =========\n");
 		int maddrs = make_local_listeners_list();
 		if((maddrs<1) || !turn_params.listener.addrs_number) {
-			TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Cannot configure any meaningful IP listener address\n", __FUNCTION__);
+			TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "%s: Cannot configure any meaningful IP listener address\n", __FUNCTION__);
 			fprintf(stderr,"\n%s\n", Usage);
 			exit(-1);
 		}
@@ -1738,10 +1784,27 @@ int main(int argc, char **argv)
 		}
 
 		if (!turn_params.relays_number) {
-			TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "You must specify the relay address(es)\n",
+			TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "%s: You must specify the relay address(es)\n",
 							__FUNCTION__);
 			fprintf(stderr,"\n%s\n", Usage);
 			exit(-1);
+		}
+	}
+
+	if(turn_params.external_ip && turn_params.relay_addrs) {
+		size_t ir = 0;
+		for(ir = 0; ir < turn_params.relays_number; ++ir) {
+			if(turn_params.relay_addrs[ir]) {
+				const char* sra = (const char*)turn_params.relay_addrs[ir];
+				if((strstr(sra,"127.0.0.1") != sra)&&(strstr(sra,"::1")!=sra)) {
+					ioa_addr ra;
+					if(make_ioa_addr((const u08bits*)sra,0,&ra)<0) {
+						TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"-X : Wrong address format: %s\n",sra);
+					} else if(ra.ss.sa_family == turn_params.external_ip->ss.sa_family) {
+						ioa_addr_add_mapping(turn_params.external_ip,&ra);
+					}
+				}
+			}
 		}
 	}
 
@@ -1815,15 +1878,21 @@ int main(int argc, char **argv)
 
 #if defined(OPENSSL_THREADS)
 
-static pthread_mutex_t* mutex_buf = NULL;
+static char some_buffer[65536];
+
+//array larger than anything that OpenSSL may need:
+static pthread_mutex_t mutex_buf[256];
+static int mutex_buf_initialized = 0;
 
 static void locking_function(int mode, int n, const char *file, int line) {
   UNUSED_ARG(file);
   UNUSED_ARG(line);
-  if (mode & CRYPTO_LOCK)
-    pthread_mutex_lock(&mutex_buf[n]);
-  else
-    pthread_mutex_unlock(&mutex_buf[n]);
+  if(mutex_buf_initialized && (n < CRYPTO_num_locks())) {
+	  if (mode & CRYPTO_LOCK)
+		  pthread_mutex_lock(&(mutex_buf[n]));
+	  else
+		  pthread_mutex_unlock(&(mutex_buf[n]));
+  }
 }
 
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L
@@ -1846,12 +1915,13 @@ static int THREAD_setup(void) {
 
 	int i;
 
-	mutex_buf = (pthread_mutex_t*) turn_malloc(CRYPTO_num_locks()
-			* sizeof(pthread_mutex_t));
-	if (!mutex_buf)
-		return 0;
-	for (i = 0; i < CRYPTO_num_locks(); i++)
-		pthread_mutex_init(&mutex_buf[i], NULL);
+	some_buffer[0] = 0;
+
+	for (i = 0; i < CRYPTO_num_locks(); i++) {
+		pthread_mutex_init(&(mutex_buf[i]), NULL);
+	}
+
+	mutex_buf_initialized = 1;
 
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L
 	CRYPTO_THREADID_set_callback(id_function);
@@ -1872,7 +1942,7 @@ int THREAD_cleanup(void) {
 
   int i;
 
-  if (!mutex_buf)
+  if (!mutex_buf_initialized)
     return 0;
 
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L
@@ -1882,10 +1952,11 @@ int THREAD_cleanup(void) {
 #endif
 
   CRYPTO_set_locking_callback(NULL);
-  for (i = 0; i < CRYPTO_num_locks(); i++)
-    pthread_mutex_destroy(&mutex_buf[i]);
-  turn_free(mutex_buf,sizeof(pthread_mutex_t));
-  mutex_buf = NULL;
+  for (i = 0; i < CRYPTO_num_locks(); i++) {
+	  pthread_mutex_destroy(&(mutex_buf[i]));
+  }
+
+  mutex_buf_initialized = 0;
 
 #endif
 
@@ -1902,10 +1973,14 @@ static void adjust_key_file_name(char *fn, const char* file_title, int critical)
 	} else {
 
 	  full_path_to_file = find_config_file(fn, 1);
-	  FILE *f = full_path_to_file ? fopen(full_path_to_file,"r") : NULL;
-	  if(!f) {
-	    TURN_LOG_FUNC(TURN_LOG_LEVEL_WARNING,"WARNING: cannot find %s file: %s (1)\n",file_title,fn);
-	    goto keyerr;
+	  {
+		  FILE *f = full_path_to_file ? fopen(full_path_to_file,"r") : NULL;
+		  if(!f) {
+			  TURN_LOG_FUNC(TURN_LOG_LEVEL_WARNING,"WARNING: cannot find %s file: %s (1)\n",file_title,fn);
+			  goto keyerr;
+		  } else {
+			  fclose(f);
+		  }
 	  }
 
 	  if(!full_path_to_file) {
@@ -2126,7 +2201,7 @@ static void set_ctx(SSL_CTX* ctx, const char *protocol)
 		EC_KEY *ecdh = EC_KEY_new_by_curve_name(nid);
 		if (!ecdh) {
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,
-					"%s: ERROR: allocate EC suite\n");
+				      "%s: ERROR: allocate EC suite\n",__FUNCTION__);
 		} else {
 			SSL_CTX_set_tmp_ecdh(ctx, ecdh);
 			EC_KEY_free(ecdh);
@@ -2160,10 +2235,10 @@ static void set_ctx(SSL_CTX* ctx, const char *protocol)
 		}
 
 		if(!dh) {
-			TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "%s: ERROR: cannot allocate DH suite\n");
+		  TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "%s: ERROR: cannot allocate DH suite\n",__FUNCTION__);
 		} else {
 			if (1 != SSL_CTX_set_tmp_dh (ctx, dh)) {
-				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "%s: ERROR: cannot set DH\n");
+			  TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "%s: ERROR: cannot set DH\n",__FUNCTION__);
 			}
 			DH_free (dh);
 		}
@@ -2171,10 +2246,8 @@ static void set_ctx(SSL_CTX* ctx, const char *protocol)
 
 	{
 		int op = 0;
-
 #if defined(SSL_OP_NO_SSLv2)
-		if(turn_params.no_sslv2)
-			op |= SSL_OP_NO_SSLv2;
+		op |= SSL_OP_NO_SSLv2;
 #endif
 		if(turn_params.no_sslv3)
 			op |= SSL_OP_NO_SSLv3;

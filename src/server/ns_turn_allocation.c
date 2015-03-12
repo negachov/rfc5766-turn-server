@@ -62,7 +62,6 @@ void clear_allocation(allocation *a)
 				if(tc) {
 					delete_tcp_connection(tc);
 					a->tcs.elems[i] = NULL;
-					break;
 				}
 			}
 			turn_free(a->tcs.elems,sz*sizeof(tcp_connection*));
@@ -125,6 +124,12 @@ static int delete_channel_info_from_allocation_map(ur_map_key_type key, ur_map_v
 void turn_permission_clean(turn_permission_info* tinfo)
 {
 	if (tinfo && tinfo->allocated) {
+
+		if(tinfo->verbose) {
+			char s[257]="\0";
+			addr_to_string(&(tinfo->addr),(u08bits*)s);
+			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "session %018llu: peer %s deleted\n",tinfo->session_id,s);
+		}
 
 		if(!(tinfo->lifetime_ev)) {
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "!!! %s: strange (1) permission to be cleaned\n",__FUNCTION__);
@@ -215,10 +220,14 @@ static turn_permission_info* get_from_turn_permission_hashtable(turn_permission_
 }
 
 static void ch_info_clean(ch_info* c) {
-  if(c) {
-    IOA_EVENT_DEL(c->lifetime_ev);
-    ns_bzero(c,sizeof(ch_info));
-  }
+  if (c) {
+		if (c->kernel_channel) {
+			DELETE_TURN_CHANNEL_KERNEL(c->kernel_channel);
+			c->kernel_channel = 0;
+		}
+		IOA_EVENT_DEL(c->lifetime_ev);
+		ns_bzero(c,sizeof(ch_info));
+	}
 }
 
 static int delete_channel_info_from_allocation_map(ur_map_key_type key, ur_map_value_type value)
@@ -580,9 +589,7 @@ void delete_tcp_connection(tcp_connection *tc)
 				}
 			}
 		}
-		set_ioa_socket_sub_session(tc->client_s,NULL);
 		IOA_CLOSE_SOCKET(tc->client_s);
-		set_ioa_socket_sub_session(tc->peer_s,NULL);
 		IOA_CLOSE_SOCKET(tc->peer_s);
 		turn_free(tc,sizeof(tcp_connection));
 	}
@@ -594,6 +601,17 @@ tcp_connection *get_and_clean_tcp_connection_by_id(ur_map *map, tcp_connection_i
 		ur_map_value_type t = 0;
 		if (ur_map_get(map, (ur_map_key_type)id, &t) && t) {
 			ur_map_del(map, (ur_map_key_type)id,NULL);
+			return (tcp_connection*)t;
+		}
+	}
+	return NULL;
+}
+
+tcp_connection *get_tcp_connection_by_id(ur_map *map, tcp_connection_id id)
+{
+	if(map) {
+		ur_map_value_type t = 0;
+		if (ur_map_get(map, (ur_map_key_type)id, &t) && t) {
 			return (tcp_connection*)t;
 		}
 	}

@@ -80,6 +80,8 @@ struct turn_sock_extended_err {
 
 #define TRIAL_EFFORTS_TO_SEND (2)
 
+#define SSL_MAX_RENEG_NUMBER (3)
+
 const int predef_timer_intervals[PREDEF_TIMERS_NUM] = {30,60,90,120,240,300,360,540,600,700,800,900,1800,3600};
 
 /************** Forward function declarations ******/
@@ -87,6 +89,7 @@ const int predef_timer_intervals[PREDEF_TIMERS_NUM] = {30,60,90,120,240,300,360,
 static int socket_readerr(evutil_socket_t fd, ioa_addr *orig_addr);
 
 static void socket_input_handler(evutil_socket_t fd, short what, void* arg);
+static void socket_output_handler_bev(struct bufferevent *bev, void* arg);
 static void socket_input_handler_bev(struct bufferevent *bev, void* arg);
 static void eventcb_bev(struct bufferevent *bev, short events, void *arg);
 
@@ -98,15 +101,86 @@ static void close_socket_net_data(ioa_socket_handle s);
 
 /************** Utils **************************/
 
+static const int tcp_congestion_control = 1;
+
+static int bufferevent_enabled(struct bufferevent *bufev, short flags)
+{
+  return (bufferevent_get_enabled(bufev) & flags);
+}
+
+static int is_socket_writeable(ioa_socket_handle s, size_t sz, const char *msg, int option) 
+{
+  UNUSED_ARG(sz);
+  UNUSED_ARG(msg);
+  UNUSED_ARG(option);
+
+  if(!s)
+	  return 0;
+
+  if(!(s->done) && !(s->broken) && !(s->tobeclosed)) {
+
+    switch(s->st) {
+      
+    case TCP_SOCKET:
+    case TLS_SOCKET:
+      if(s->bev) {
+
+	struct evbuffer *evb = bufferevent_get_output(s->bev);
+	
+	if(evb) {
+	  size_t bufsz = evbuffer_get_length(evb);
+	  size_t newsz = bufsz + sz;
+	  
+	  switch(s->sat) {
+	  case TCP_CLIENT_DATA_SOCKET:
+	  case TCP_RELAY_DATA_SOCKET:
+	    
+	    switch(option) {
+	    case 0:
+	    case 1:
+	      if(newsz >= BUFFEREVENT_MAX_TCP_TO_TCP_WRITE) {
+	    	  return 0;
+	      }
+	      break;
+	    case 3:
+	    case 4:
+	    	if(newsz >= BUFFEREVENT_MAX_TCP_TO_TCP_WRITE) {
+	    	  return 0;
+	    	}
+	      break;
+	    default:
+	      return 1;
+	    };
+	    break;
+	  default:
+	    if(option == 2) {
+	      if(newsz >= BUFFEREVENT_MAX_UDP_TO_TCP_WRITE) {
+	    	  return 0;
+	      }
+	    }
+	  };
+	}
+      }
+      break;
+    default:
+      ;
+    };
+  }
+
+  return 1;
+}
+
 static void log_socket_event(ioa_socket_handle s, const char *msg, int error) {
 	if(s && (error || (s->e && s->e->verbose))) {
 		if(!msg)
 			msg = "General socket event";
 		turnsession_id id = 0;
 		{
-			ts_ur_super_session *ss = (ts_ur_super_session *) (s->session);
+			ts_ur_super_session *ss = s->session;
 			if (ss) {
 				id = ss->id;
+			} else{
+				return;
 			}
 		}
 
@@ -114,17 +188,31 @@ static void log_socket_event(ioa_socket_handle s, const char *msg, int error) {
 		if(error)
 			ll = TURN_LOG_LEVEL_ERROR;
 
-		if(EVUTIL_SOCKET_ERROR()) {
-			TURN_LOG_FUNC(ll,"session %018llu: %s: %s\n",(unsigned long long)id,
-											msg, evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
-		} else {
-			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: %s\n",(unsigned long long)id,msg);
+		UNUSED_ARG(ll);
+
+		{
+			char sraddr[129]="\0";
+			char sladdr[129]="\0";
+			addr_to_string(&(s->remote_addr),(u08bits*)sraddr);
+			addr_to_string(&(s->local_addr),(u08bits*)sladdr);
+
+			if(EVUTIL_SOCKET_ERROR()) {
+				TURN_LOG_FUNC(ll,"session %018llu: %s: %s (local %s, remote %s)\n",(unsigned long long)id,
+											msg, evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()),
+											sladdr,sraddr);
+			} else {
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: %s (local %s, remote %s)\n",
+						(unsigned long long)id,msg,sladdr,sraddr);
+			}
 		}
 	}
 }
 
 int set_df_on_ioa_socket(ioa_socket_handle s, int value)
 {
+	if(!s)
+		return 0;
+
 	if(s->parent_s)
 		return 0;
 
@@ -205,32 +293,32 @@ static stun_buffer_list_elem *new_blist_elem(ioa_engine_handle e)
 	return ret;
 }
 
-static inline void add_elem_to_buffer_list(stun_buffer_list *bufs, stun_buffer_list_elem *elem)
+static inline void add_elem_to_buffer_list(stun_buffer_list *bufs, stun_buffer_list_elem *buf_elem)
 {
-	elem->next = bufs->head;
-	bufs->head = elem;
+	buf_elem->next = bufs->head;
+	bufs->head = buf_elem;
 	bufs->tsz += 1;
 }
 
 static void add_buffer_to_buffer_list(stun_buffer_list *bufs, s08bits *buf, size_t len)
 {
 	if(bufs && buf && (bufs->tsz<MAX_SOCKET_BUFFER_BACKLOG)) {
-	  stun_buffer_list_elem *elem = (stun_buffer_list_elem *)turn_malloc(sizeof(stun_buffer_list_elem));
-	  ns_bcopy(buf,elem->buf.buf,len);
-	  elem->buf.len = len;
-	  elem->buf.offset = 0;
-	  elem->buf.coffset = 0;
-	  add_elem_to_buffer_list(bufs,elem);
+	  stun_buffer_list_elem *buf_elem = (stun_buffer_list_elem *)turn_malloc(sizeof(stun_buffer_list_elem));
+	  ns_bcopy(buf,buf_elem->buf.buf,len);
+	  buf_elem->buf.len = len;
+	  buf_elem->buf.offset = 0;
+	  buf_elem->buf.coffset = 0;
+	  add_elem_to_buffer_list(bufs,buf_elem);
 	}
 }
 
-static void free_blist_elem(ioa_engine_handle e, stun_buffer_list_elem *elem)
+static void free_blist_elem(ioa_engine_handle e, stun_buffer_list_elem *buf_elem)
 {
-	if(elem) {
+	if(buf_elem) {
 		if(e && (e->bufs.tsz<MAX_BUFFER_QUEUE_SIZE_PER_ENGINE)) {
-			add_elem_to_buffer_list(&(e->bufs), elem);
+			add_elem_to_buffer_list(&(e->bufs), buf_elem);
 		} else {
-			turn_free(elem,sizeof(stun_buffer_list_elem));
+			turn_free(buf_elem,sizeof(stun_buffer_list_elem));
 		}
 	}
 }
@@ -241,10 +329,10 @@ static void timer_handler(ioa_engine_handle e, void* arg) {
 
   UNUSED_ARG(arg);
 
-  e->jiffie = turn_time();
-
-  _log_time_value = e->jiffie;
+  _log_time_value = turn_time();
   _log_time_value_set = 1;
+
+  e->jiffie = _log_time_value;
 }
 
 ioa_engine_handle create_ioa_engine(super_memory_t *sm,
@@ -274,7 +362,7 @@ ioa_engine_handle create_ioa_engine(super_memory_t *sm,
 	}
 
 	if (!relays_number || !relay_addrs || !tp) {
-		TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Cannot create TURN engine\n", __FUNCTION__);
+		TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "%s: Cannot create TURN engine\n", __FUNCTION__);
 		return NULL;
 	} else {
 		ioa_engine_handle e = (ioa_engine_handle)allocate_super_memory_region(sm, sizeof(ioa_engine));
@@ -478,7 +566,7 @@ ioa_timer_handle set_ioa_timer(ioa_engine_handle e, int secs, int ms, ioa_timer_
 		te->e = e;
 		te->ev = ev;
 		te->cb = cb;
-		te->txt = strdup(txt);
+		te->txt = turn_strdup(txt);
 
 		if(!ms) {
 			tv.tv_usec = 0;
@@ -528,28 +616,61 @@ void delete_ioa_timer(ioa_timer_handle th)
 
 /************** SOCKETS HELPERS ***********************/
 
-static int ioa_socket_check_bandwidth(ioa_socket_handle s, size_t sz)
+int ioa_socket_check_bandwidth(ioa_socket_handle s, ioa_network_buffer_handle nbh, int read)
 {
-	if((s->e->max_bpj != 0) &&
-			((s->sat == CLIENT_SOCKET)||
-			 (s->sat == TCP_CLIENT_DATA_SOCKET)||
-			 (s->sat == TCP_RELAY_DATA_SOCKET))) {
+	if(s && (s->e) && nbh && (s->e->max_bpj != 0) &&
+			((s->sat == CLIENT_SOCKET) || (s->sat == RELAY_SOCKET) || (s->sat == RELAY_RTCP_SOCKET)) &&
+			s->session) {
+
+		size_t sz = ioa_network_buffer_get_size(nbh);
+
+		band_limit_t max_bps = s->e->max_bpj;
+
+		if(max_bps<1)
+			return 1;
+
+		struct traffic_bytes *traffic = &(s->data_traffic);
+
+		if(s->sat == CLIENT_SOCKET) {
+			u08bits *buf = ioa_network_buffer_data(nbh);
+			if(stun_is_command_message_str(buf,sz)) {
+				u16bits method = stun_get_method_str(buf,sz);
+				if((method != STUN_METHOD_SEND) && (method != STUN_METHOD_DATA)) {
+					traffic = &(s->control_traffic);
+				}
+			}
+		}
+
 		band_limit_t bsz = (band_limit_t)sz;
+
 		if(s->jiffie != s->e->jiffie) {
+
 			s->jiffie = s->e->jiffie;
-			if(bsz > s->e->max_bpj) {
-				s->jiffie_bytes = 0;
+			traffic->jiffie_bytes_read = 0;
+			traffic->jiffie_bytes_write = 0;
+
+			if(bsz > max_bps) {
 				return 0;
 			} else {
-				s->jiffie_bytes = bsz;
+				if(read)
+					traffic->jiffie_bytes_read = bsz;
+				else
+					traffic->jiffie_bytes_write = bsz;
 				return 1;
 			}
 		} else {
-			band_limit_t nsz = s->jiffie_bytes + bsz;
-			if(nsz > s->e->max_bpj)
+			band_limit_t nsz;
+			if(read)
+				nsz = traffic->jiffie_bytes_read + bsz;
+			else
+				nsz = traffic->jiffie_bytes_write + bsz;
+			if(nsz > max_bps) {
 				return 0;
-			else {
-				s->jiffie_bytes = nsz;
+			} else {
+				if(read)
+					traffic->jiffie_bytes_read = nsz;
+				else
+					traffic->jiffie_bytes_write = nsz;
 				return 1;
 			}
 		}
@@ -563,7 +684,6 @@ int get_ioa_socket_from_reservation(ioa_engine_handle e, u64bits in_reservation_
   if (e && in_reservation_token && s) {
     *s = rtcp_map_get(e->map_rtcp, in_reservation_token);
     if (*s) {
-      rtcp_map_del_savefd(e->map_rtcp, in_reservation_token);
       return 0;
     }
   }
@@ -571,134 +691,6 @@ int get_ioa_socket_from_reservation(ioa_engine_handle e, u64bits in_reservation_
 }
 
 /* Socket options helpers ==>> */
-
-#define CORRECT_RAW_TTL(ttl) do { if(ttl<0 || ttl>255) ttl=TTL_DEFAULT; } while(0)
-#define CORRECT_RAW_TOS(tos) do { if(tos<0 || tos>255) tos=TOS_DEFAULT; } while(0)
-
-static int get_raw_socket_ttl(evutil_socket_t fd, int family)
-{
-	int ttl = 0;
-
-	if(family == AF_INET6) {
-#if !defined(IPV6_RECVHOPLIMIT)
-		UNUSED_ARG(fd);
-		do { return TTL_IGNORE; } while(0);
-#else
-		socklen_t slen = (socklen_t)sizeof(ttl);
-		if(getsockopt(fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &ttl,&slen)<0) {
-			perror("get HOPLIMIT on socket");
-			return TTL_IGNORE;
-		}
-#endif
-	} else {
-#if !defined(IP_RECVTTL)
-		UNUSED_ARG(fd);
-		do { return TTL_IGNORE; } while(0);
-#else
-		socklen_t slen = (socklen_t)sizeof(ttl);
-		if(getsockopt(fd, IPPROTO_IP, IP_TTL, &ttl,&slen)<0) {
-			perror("get TTL on socket");
-			return TTL_IGNORE;
-		}
-#endif
-	}
-
-	CORRECT_RAW_TTL(ttl);
-
-	return ttl;
-}
-
-static int get_raw_socket_tos(evutil_socket_t fd, int family)
-{
-	int tos = 0;
-
-	if(family == AF_INET6) {
-#if !defined(IPV6_RECVTCLASS)
-		UNUSED_ARG(fd);
-		do { return TOS_IGNORE; } while(0);
-#else
-		socklen_t slen = (socklen_t)sizeof(tos);
-		if(getsockopt(fd, IPPROTO_IPV6, IPV6_TCLASS, &tos,&slen)<0) {
-			perror("get TCLASS on socket");
-			return -1;
-		}
-#endif
-	} else {
-#if !defined(IP_RECVTOS)
-		UNUSED_ARG(fd);
-		do { return TOS_IGNORE; } while(0);
-#else
-		socklen_t slen = (socklen_t)sizeof(tos);
-		if(getsockopt(fd, IPPROTO_IP, IP_TOS, &tos,&slen)<0) {
-			perror("get TOS on socket");
-			return -1;
-		}
-#endif
-	}
-
-	CORRECT_RAW_TOS(tos);
-
-	return tos;
-}
-
-static int set_raw_socket_ttl(evutil_socket_t fd, int family, int ttl)
-{
-
-	if(family == AF_INET6) {
-#if !defined(IPV6_RECVHOPLIMIT)
-		UNUSED_ARG(fd);
-		UNUSED_ARG(ttl);
-#else
-		CORRECT_RAW_TTL(ttl);
-		if(setsockopt(fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &ttl,sizeof(ttl))<0) {
-			perror("set HOPLIMIT on socket");
-			return -1;
-		}
-#endif
-	} else {
-#if !defined(IP_RECVTTL)
-		UNUSED_ARG(fd);
-		UNUSED_ARG(ttl);
-#else
-		CORRECT_RAW_TTL(ttl);
-		if(setsockopt(fd, IPPROTO_IP, IP_TTL, &ttl,sizeof(ttl))<0) {
-			perror("set TTL on socket");
-			return -1;
-		}
-#endif
-	}
-
-	return 0;
-}
-
-static int set_raw_socket_tos(evutil_socket_t fd, int family, int tos)
-{
-
-	if(family == AF_INET6) {
-#if !defined(IPV6_RECVTCLASS)
-		UNUSED_ARG(fd);
-		UNUSED_ARG(tos);
-#else
-		CORRECT_RAW_TOS(tos);
-		if(setsockopt(fd, IPPROTO_IPV6, IPV6_TCLASS, &tos,sizeof(tos))<0) {
-			perror("set TCLASS on socket");
-			return -1;
-		}
-#endif
-	} else {
-#if !defined(IPV6_RECVTOS)
-		UNUSED_ARG(fd);
-		UNUSED_ARG(tos);
-#else
-		if(setsockopt(fd, IPPROTO_IP, IP_TOS, &tos,sizeof(tos))<0) {
-			perror("set TOS on socket");
-			return -1;
-		}
-#endif
-	}
-
-	return 0;
-}
 
 static int set_socket_ttl(ioa_socket_handle s, int ttl)
 {
@@ -879,33 +871,31 @@ int set_socket_options(ioa_socket_handle s)
 
 /* <<== Socket options helpers */
 
-ioa_socket_handle create_unbound_ioa_socket(ioa_engine_handle e, ioa_socket_handle parent_s, int family, SOCKET_TYPE st, SOCKET_APP_TYPE sat)
+ioa_socket_handle create_unbound_ioa_socket(ioa_engine_handle e, int family, SOCKET_TYPE st, SOCKET_APP_TYPE sat)
 {
 	evutil_socket_t fd = -1;
 	ioa_socket_handle ret = NULL;
 
-	if(!parent_s) {
-		switch (st){
-		case UDP_SOCKET:
-			fd = socket(family, SOCK_DGRAM, 0);
-			if (fd < 0) {
-				perror("UDP socket");
-				return NULL;
-			}
-			set_sock_buf_size(fd, UR_CLIENT_SOCK_BUF_SIZE);
-			break;
-		case TCP_SOCKET:
-			fd = socket(family, SOCK_STREAM, 0);
-			if (fd < 0) {
-				perror("TCP socket");
-				return NULL;
-			}
-			set_sock_buf_size(fd, UR_CLIENT_SOCK_BUF_SIZE);
-			break;
-		default:
-			/* we do not support other sockets in the relay position */
+	switch (st){
+	case UDP_SOCKET:
+		fd = socket(family, SOCK_DGRAM, 0);
+		if (fd < 0) {
+			perror("UDP socket");
 			return NULL;
 		}
+		set_sock_buf_size(fd, UR_CLIENT_SOCK_BUF_SIZE);
+		break;
+	case TCP_SOCKET:
+		fd = socket(family, SOCK_STREAM, 0);
+		if (fd < 0) {
+			perror("TCP socket");
+			return NULL;
+		}
+		set_sock_buf_size(fd, UR_CLIENT_SOCK_BUF_SIZE);
+		break;
+	default:
+		/* we do not support other sockets in the relay position */
+		return NULL;
 	}
 
 	ret = (ioa_socket*)turn_malloc(sizeof(ioa_socket));
@@ -919,11 +909,7 @@ ioa_socket_handle create_unbound_ioa_socket(ioa_engine_handle e, ioa_socket_hand
 	ret->sat = sat;
 	ret->e = e;
 
-	if(parent_s) {
-		add_socket_to_parent(parent_s, ret);
-	} else {
-		set_socket_options(ret);
-	}
+	set_socket_options(ret);
 
 	return ret;
 }
@@ -994,8 +980,6 @@ int create_relay_ioa_sockets(ioa_engine_handle e,
 		ioa_addr rtcp_local_addr;
 		addr_cpy(&rtcp_local_addr, &relay_addr);
 
-		addr_debug_print(e->verbose, &relay_addr, "Server relay addr");
-
 		int i = 0;
 		int port = 0;
 		ioa_addr local_addr;
@@ -1011,7 +995,7 @@ int create_relay_ioa_sockets(ioa_engine_handle e,
 				if (port >= 0 && even_port > 0) {
 
 					IOA_CLOSE_SOCKET(*rtcp_s);
-					*rtcp_s = create_unbound_ioa_socket(e, NULL, relay_addr.ss.sa_family, UDP_SOCKET, RELAY_RTCP_SOCKET);
+					*rtcp_s = create_unbound_ioa_socket(e, relay_addr.ss.sa_family, UDP_SOCKET, RELAY_RTCP_SOCKET);
 					if (*rtcp_s == NULL) {
 						perror("socket");
 						IOA_CLOSE_SOCKET(*rtp_s);
@@ -1047,16 +1031,21 @@ int create_relay_ioa_sockets(ioa_engine_handle e,
 
 				IOA_CLOSE_SOCKET(*rtp_s);
 
-				*rtp_s = create_unbound_ioa_socket(e, NULL, relay_addr.ss.sa_family,
+				*rtp_s = create_unbound_ioa_socket(e, relay_addr.ss.sa_family,
 										(transport == STUN_ATTRIBUTE_TRANSPORT_TCP_VALUE) ? TCP_SOCKET : UDP_SOCKET,
 										RELAY_SOCKET);
 				if (*rtp_s == NULL) {
-					if (rtcp_s)
+					int rtcp_bound = 0;
+					if (rtcp_s && *rtcp_s) {
+						rtcp_bound = (*rtcp_s)->bound;
 						IOA_CLOSE_SOCKET(*rtcp_s);
+					}
 					addr_set_port(&local_addr, port);
 					turnipports_release(tp, transport, &local_addr);
-					if (rtcp_port >= 0)
+					if (rtcp_port >= 0 && !rtcp_bound) {
+						addr_set_port(&rtcp_local_addr, rtcp_port);
 						turnipports_release(tp, transport, &rtcp_local_addr);
+					}
 					perror("socket");
 					return -1;
 				}
@@ -1069,12 +1058,17 @@ int create_relay_ioa_sockets(ioa_engine_handle e,
 					break;
 				} else {
 					IOA_CLOSE_SOCKET(*rtp_s);
-					if (rtcp_s)
+					int rtcp_bound = 0;
+					if (rtcp_s && *rtcp_s) {
+						rtcp_bound = (*rtcp_s)->bound;
 						IOA_CLOSE_SOCKET(*rtcp_s);
+					}
 					addr_set_port(&local_addr, port);
 					turnipports_release(tp, transport, &local_addr);
-					if (rtcp_port >= 0)
+					if (rtcp_port >= 0 && !rtcp_bound) {
+						addr_set_port(&rtcp_local_addr, rtcp_port);
 						turnipports_release(tp, transport, &rtcp_local_addr);
+					}
 					rtcp_port = -1;
 				}
 			}
@@ -1217,7 +1211,7 @@ static void connect_eventcb(struct bufferevent *bev, short events, void *ptr)
 
 ioa_socket_handle ioa_create_connecting_tcp_relay_socket(ioa_socket_handle s, ioa_addr *peer_addr, connect_cb cb, void *arg)
 {
-	ioa_socket_handle ret = create_unbound_ioa_socket(s->e, NULL, s->family, s->st, TCP_RELAY_DATA_SOCKET);
+	ioa_socket_handle ret = create_unbound_ioa_socket(s->e, s->family, s->st, TCP_RELAY_DATA_SOCKET);
 
 	if(!ret) {
 		return NULL;
@@ -1257,7 +1251,7 @@ ioa_socket_handle ioa_create_connecting_tcp_relay_socket(ioa_socket_handle s, io
 
 	ret->conn_bev = bufferevent_socket_new(ret->e->event_base,
 					ret->fd,
-					BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS);
+					TURN_BUFFEREVENTS_OPTIONS);
 	bufferevent_setcb(ret->conn_bev, NULL, NULL, connect_eventcb, ret);
 
 	ret->conn_arg = arg;
@@ -1341,6 +1335,7 @@ void add_socket_to_map(ioa_socket_handle s, ur_addr_map *amap)
 void delete_socket_from_map(ioa_socket_handle s)
 {
 	if(s && s->sockets_container) {
+
 		ur_addr_map_del(s->sockets_container,
 				&(s->remote_addr),
 				NULL);
@@ -1365,18 +1360,20 @@ ioa_socket_handle create_ioa_socket_from_fd(ioa_engine_handle e,
 	ret->magic = SOCKET_MAGIC;
 
 	ret->fd = fd;
-	ret->family = local_addr->ss.sa_family;
 	ret->st = st;
 	ret->sat = sat;
 	ret->e = e;
 
 	if (local_addr) {
+		ret->family = local_addr->ss.sa_family;
 		ret->bound = 1;
 		addr_cpy(&(ret->local_addr), local_addr);
 	}
 
 	if (remote_addr) {
 		ret->connected = 1;
+		if(!(ret->family))
+			ret->family = remote_addr->ss.sa_family;
 		addr_cpy(&(ret->remote_addr), remote_addr);
 	}
 
@@ -1389,13 +1386,54 @@ ioa_socket_handle create_ioa_socket_from_fd(ioa_engine_handle e,
 	return ret;
 }
 
+static void ssl_info_callback(SSL *ssl, int where, int ret) {
+
+    UNUSED_ARG(ret);
+
+    if (0 != (where & SSL_CB_HANDSHAKE_START)) {
+    	ioa_socket_handle s = (ioa_socket_handle)SSL_get_app_data(ssl);
+    	if(s) {
+    		++(s->ssl_renegs);
+    	}
+    } else if (0 != (where & SSL_CB_HANDSHAKE_DONE)) {
+    	if(ssl->s3) {
+    		ioa_socket_handle s = (ioa_socket_handle)SSL_get_app_data(ssl);
+    		if(s) {
+    			if(s->ssl_renegs>SSL_MAX_RENEG_NUMBER) {
+    				ssl->s3->flags |= SSL3_FLAGS_NO_RENEGOTIATE_CIPHERS;
+    			}
+    		}
+    	}
+    }
+}
+
+typedef void (*ssl_info_callback_t)(const SSL *ssl,int type,int val);
+
+static void set_socket_ssl(ioa_socket_handle s, SSL *ssl)
+{
+	if(s && (s->ssl != ssl)) {
+		if(s->ssl) {
+			SSL_set_app_data(s->ssl,NULL);
+			SSL_set_info_callback(s->ssl, (ssl_info_callback_t)NULL);
+		}
+		s->ssl = ssl;
+		if(ssl) {
+			SSL_set_app_data(ssl,s);
+			SSL_set_info_callback(ssl, (ssl_info_callback_t)ssl_info_callback);
+		}
+	}
+}
+
 /* Only must be called for DTLS_SOCKET */
 ioa_socket_handle create_ioa_socket_from_ssl(ioa_engine_handle e, ioa_socket_handle parent_s, SSL* ssl, SOCKET_TYPE st, SOCKET_APP_TYPE sat, const ioa_addr *remote_addr, const ioa_addr *local_addr)
 {
+	if(!parent_s)
+		return NULL;
+
 	ioa_socket_handle ret = create_ioa_socket_from_fd(e, parent_s->fd, parent_s, st, sat, remote_addr, local_addr);
 
 	if(ret) {
-		ret->ssl = ssl;
+		set_socket_ssl(ret,ssl);
 		if(st == DTLS_SOCKET)
 			STRCPY(ret->orig_ctx_type,"DTLSv1.0");
 	}
@@ -1501,7 +1539,8 @@ void close_ioa_socket(ioa_socket_handle s)
 
 		ioa_network_buffer_delete(s->e, s->defer_nbh);
 
-		if(s->bound && s->e && s->e->tp) {
+		if(s->bound && s->e && s->e->tp &&
+				((s->sat == RELAY_SOCKET)||(s->sat == RELAY_RTCP_SOCKET))) {
 			turnipports_release(s->e->tp,
 					((s->st == TCP_SOCKET) ? STUN_ATTRIBUTE_TRANSPORT_TCP_VALUE : STUN_ATTRIBUTE_TRANSPORT_UDP_VALUE),
 					&(s->local_addr));
@@ -1512,11 +1551,15 @@ void close_ioa_socket(ioa_socket_handle s)
 
 		close_socket_net_data(s);
 
+		s->session = NULL;
+		s->sub_session = NULL;
+		s->magic = 0;
+
 		turn_free(s,sizeof(ioa_socket));
 	}
 }
 
-ioa_socket_handle detach_ioa_socket(ioa_socket_handle s, int full_detach)
+ioa_socket_handle detach_ioa_socket(ioa_socket_handle s)
 {
 	ioa_socket_handle ret = NULL;
 
@@ -1548,14 +1591,31 @@ ioa_socket_handle detach_ioa_socket(ioa_socket_handle s, int full_detach)
 
 		evutil_socket_t udp_fd = -1;
 
-		if(full_detach && s->parent_s) {
-
+		if(s->parent_s) {
 			udp_fd = socket(s->local_addr.ss.sa_family, SOCK_DGRAM, 0);
 			if (udp_fd < 0) {
 				perror("socket");
 				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"%s: Cannot allocate new socket\n",__FUNCTION__);
 				return ret;
 			}
+			if(sock_bind_to_device(udp_fd, (unsigned char*)(s->e->relay_ifname))<0) {
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"Cannot bind udp server socket to device %s\n",(char*)(s->e->relay_ifname));
+			}
+
+			if(addr_bind(udp_fd,&(s->local_addr),1)<0) {
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"Cannot bind new detached udp server socket to local addr\n");
+				close(udp_fd);
+				return ret;
+			}
+
+			int connect_err=0;
+			if(addr_connect(udp_fd, &(s->remote_addr), &connect_err)<0) {
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"Cannot connect new detached udp server socket to remote addr\n");
+				close(udp_fd);
+				return ret;
+			}
+			set_raw_socket_ttl_options(udp_fd, s->local_addr.ss.sa_family);
+			set_raw_socket_tos_options(udp_fd, s->local_addr.ss.sa_family);
 		}
 
 		detach_socket_net_data(s);
@@ -1577,50 +1637,32 @@ ioa_socket_handle detach_ioa_socket(ioa_socket_handle s, int full_detach)
 
 		ret->magic = SOCKET_MAGIC;
 
-		ret->ssl = s->ssl;
+		SSL* ssl = s->ssl;
+		set_socket_ssl(s,NULL);
+		set_socket_ssl(ret,ssl);
+
 		ret->fd = s->fd;
 
-		ret->family = s->family;
+		ret->family = get_ioa_socket_address_family(s);
+
 		ret->st = s->st;
 		ret->sat = s->sat;
 		ret->bound = s->bound;
 		ret->local_addr_known = s->local_addr_known;
 		addr_cpy(&(ret->local_addr),&(s->local_addr));
 		ret->connected = s->connected;
-		ioa_socket_handle parent_s = s->parent_s;
 		addr_cpy(&(ret->remote_addr),&(s->remote_addr));
 
-		ur_addr_map *sockets_container = s->sockets_container;
-
+		STRCPY(ret->orig_ctx_type, s->orig_ctx_type);
+		
 		delete_socket_from_map(s);
 		delete_socket_from_parent(s);
 
-		if(full_detach && parent_s) {
+		if(udp_fd>=0) {
 
 			ret->fd = udp_fd;
 
-			if(sock_bind_to_device(udp_fd, (unsigned char*)(s->e->relay_ifname))<0) {
-			    TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"Cannot bind udp server socket to device %s\n",(char*)(s->e->relay_ifname));
-			}
-
-			if(addr_bind(udp_fd,&(s->local_addr),1)<0) {
-				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"Cannot bind new detached udp server socket to local addr\n");
-				IOA_CLOSE_SOCKET(ret);
-				return ret;
-			}
-
-			int connect_err=0;
-			if(addr_connect(udp_fd, &(s->remote_addr), &connect_err)<0) {
-				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"Cannot connect new detached udp server socket to remote addr\n");
-				IOA_CLOSE_SOCKET(ret);
-				return ret;
-			}
-
 			set_socket_options(ret);
-
-		} else {
-			add_socket_to_parent(parent_s, ret);
-			add_socket_to_map(ret,sockets_container);
 		}
 
 		ret->current_ttl = s->current_ttl;
@@ -1629,21 +1671,20 @@ ioa_socket_handle detach_ioa_socket(ioa_socket_handle s, int full_detach)
 		ret->current_tos = s->current_tos;
 		ret->default_tos = s->default_tos;
 
-		s->ssl = NULL;
 		s->fd = -1;
 	}
 
 	return ret;
 }
 
-void *get_ioa_socket_session(ioa_socket_handle s)
+ts_ur_super_session *get_ioa_socket_session(ioa_socket_handle s)
 {
 	if(s)
 		return s->session;
 	return NULL;
 }
 
-void set_ioa_socket_session(ioa_socket_handle s, void *ss)
+void set_ioa_socket_session(ioa_socket_handle s, ts_ur_super_session *ss)
 {
 	if(s)
 		s->session = ss;
@@ -1651,29 +1692,34 @@ void set_ioa_socket_session(ioa_socket_handle s, void *ss)
 
 void clear_ioa_socket_session_if(ioa_socket_handle s, void *ss)
 {
-	if(s && s->session==ss) {
+	if(s && ((void*)(s->session)==ss)) {
 		s->session=NULL;
 	}
 }
 
-void *get_ioa_socket_sub_session(ioa_socket_handle s)
+tcp_connection *get_ioa_socket_sub_session(ioa_socket_handle s)
 {
 	if(s)
 		return s->sub_session;
 	return NULL;
 }
 
-void set_ioa_socket_sub_session(ioa_socket_handle s, void *tc)
+void set_ioa_socket_sub_session(ioa_socket_handle s, tcp_connection *tc)
 {
 	if(s)
 		s->sub_session = tc;
 }
 
 int get_ioa_socket_address_family(ioa_socket_handle s) {
-	if(!s) {
+
+	int first_time = 1;
+	beg:
+	if (!(s && (s->magic == SOCKET_MAGIC) && !(s->done))) {
 		return AF_INET;
-	} else if(s->parent_s) {
-		return s->parent_s->family;
+	} else if(first_time && s->parent_s && (s != s->parent_s)) {
+		first_time = 0;
+		s = s->parent_s;
+		goto beg;
 	} else {
 		return s->family;
 	}
@@ -1701,11 +1747,13 @@ void set_ioa_socket_app_type(ioa_socket_handle s, SOCKET_APP_TYPE sat) {
 
 ioa_addr* get_local_addr_from_ioa_socket(ioa_socket_handle s)
 {
-	if (s) {
+	if (s && (s->magic == SOCKET_MAGIC) && !(s->done)) {
 
 		if(s->parent_s) {
-			return get_local_addr_from_ioa_socket(s->parent_s);
-		} else if (s->local_addr_known) {
+			s = s->parent_s;
+		}
+
+		if (s->local_addr_known) {
 			return &(s->local_addr);
 		} else if (s->bound && (addr_get_port(&(s->local_addr)) > 0)) {
 			s->local_addr_known = 1;
@@ -1730,25 +1778,33 @@ ioa_addr* get_local_addr_from_ioa_socket(ioa_socket_handle s)
 			}
 		}
 	}
-	return NULL;
+
+	{
+	  static ioa_addr lbad_addr;
+	  return &lbad_addr;
+	}
 }
 
 ioa_addr* get_remote_addr_from_ioa_socket(ioa_socket_handle s)
 {
-	if (s) {
+	if (s && (s->magic == SOCKET_MAGIC) && !(s->done)) {
 
 		if (s->connected) {
 			return &(s->remote_addr);
 		}
 	}
-	return NULL;
+
+	{
+	  static ioa_addr rbad_addr;
+	  return &rbad_addr;
+	}
 }
 
 int get_local_mtu_ioa_socket(ioa_socket_handle s)
 {
 	if(s) {
 		if(s->parent_s)
-			return get_local_mtu_ioa_socket(s->parent_s);
+			s = s->parent_s;
 
 		return get_socket_mtu(s->fd, s->family, (s->e && eve(s->e->verbose)));
 	}
@@ -2103,13 +2159,11 @@ static TURN_TLS_TYPE check_tentative_tls(ioa_socket_raw fd)
 		if((s[0]==22)&&(s[1]==3)&&(s[5]==1)&&(s[9]==3)) {
 			char max_supported = (char)(TURN_TLS_TOTAL-2);
 			if(s[10] >= max_supported)
-				ret = (TURN_TLS_TYPE)((((int)TURN_TLS_TOTAL)-1));
+				ret = TURN_TLS_SSL23; /* compatibility mode */
 			else
 				ret = (TURN_TLS_TYPE)(s[10]+1);
 		} else if((s[2]==1)&&(s[3]==3)) {
 			ret = TURN_TLS_SSL23; /* compatibility mode */
-		} else if((s[2]==1)&&(s[3]==0)&&(s[4]==2)) {
-			ret = TURN_TLS_SSL23; /* old mode */
 		}
 	}
 
@@ -2149,6 +2203,22 @@ static int socket_input_worker(ioa_socket_handle s)
 	if(s->connected)
 		addr_cpy(&remote_addr,&(s->remote_addr));
 
+	if(tcp_congestion_control && s->sub_session && s->bev) {
+	  if(s == s->sub_session->client_s && (s->sub_session->peer_s)) {
+	    if(!is_socket_writeable(s->sub_session->peer_s, STUN_BUFFER_SIZE,__FUNCTION__,0)) {
+	      if(bufferevent_enabled(s->bev,EV_READ)) {
+	    	  bufferevent_disable(s->bev,EV_READ);
+	      }
+	    }
+	  } else if(s == s->sub_session->peer_s && (s->sub_session->client_s)) {
+	    if(!is_socket_writeable(s->sub_session->client_s, STUN_BUFFER_SIZE,__FUNCTION__,1)) {
+	      if(bufferevent_enabled(s->bev,EV_READ)) {
+	    	  bufferevent_disable(s->bev,EV_READ);
+	      }
+	    }
+	  }
+	}
+
 	if(s->st == TLS_SOCKET) {
 #if !defined(TURN_NO_TLS)
 		SSL *ctx = bufferevent_openssl_get_ssl(s->bev);
@@ -2183,44 +2253,45 @@ static int socket_input_worker(ioa_socket_handle s)
 #if defined(SSL_TXT_TLSV1_2)
 			case TURN_TLS_v1_2:
 				if(s->e->tls_ctx_v1_2) {
-					s->ssl = SSL_new(s->e->tls_ctx_v1_2);
+					set_socket_ssl(s,SSL_new(s->e->tls_ctx_v1_2));
 					STRCPY(s->orig_ctx_type,"TLSv1.2");
-					break;
 				}
+				break;
 #endif
 #if defined(SSL_TXT_TLSV1_1)
 			case TURN_TLS_v1_1:
 				if(s->e->tls_ctx_v1_1) {
-					s->ssl = SSL_new(s->e->tls_ctx_v1_1);
+					set_socket_ssl(s,SSL_new(s->e->tls_ctx_v1_1));
 					STRCPY(s->orig_ctx_type,"TLSv1.1");
-					break;
 				}
-
+				break;
 #endif
 			case TURN_TLS_v1_0:
 				if(s->e->tls_ctx_v1_0) {
-					s->ssl = SSL_new(s->e->tls_ctx_v1_0);
+					set_socket_ssl(s,SSL_new(s->e->tls_ctx_v1_0));
 					STRCPY(s->orig_ctx_type,"TLSv1.0");
-					break;
 				}
+				break;
 			default:
 				if(s->e->tls_ctx_ssl23) {
-					s->ssl = SSL_new(s->e->tls_ctx_ssl23);
+					set_socket_ssl(s,SSL_new(s->e->tls_ctx_ssl23));
 					STRCPY(s->orig_ctx_type,"SSLv23");
 				} else {
 					s->tobeclosed = 1;
 					return 0;
 				}
 			};
-			s->bev = bufferevent_openssl_socket_new(s->e->event_base,
+			if(s->ssl) {
+				s->bev = bufferevent_openssl_socket_new(s->e->event_base,
 								s->fd,
 								s->ssl,
 								BUFFEREVENT_SSL_ACCEPTING,
-								BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS);
-			bufferevent_setcb(s->bev, socket_input_handler_bev, NULL,
-					eventcb_bev, s);
-			bufferevent_setwatermark(s->bev, EV_READ, 1, BUFFEREVENT_HIGH_WATERMARK);
-			bufferevent_enable(s->bev, EV_READ); /* Start reading. */
+								TURN_BUFFEREVENTS_OPTIONS);
+				bufferevent_setcb(s->bev, socket_input_handler_bev, socket_output_handler_bev,
+								eventcb_bev, s);
+				bufferevent_setwatermark(s->bev, EV_READ|EV_WRITE, 0, BUFFEREVENT_HIGH_WATERMARK);
+				bufferevent_enable(s->bev, EV_READ|EV_WRITE); /* Start reading. */
+			}
 		} else
 #endif //TURN_NO_TLS
 		{
@@ -2230,11 +2301,11 @@ static int socket_input_worker(ioa_socket_handle s)
 			}
 			s->bev = bufferevent_socket_new(s->e->event_base,
 							s->fd,
-							BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS);
-			bufferevent_setcb(s->bev, socket_input_handler_bev, NULL,
+							TURN_BUFFEREVENTS_OPTIONS);
+			bufferevent_setcb(s->bev, socket_input_handler_bev, socket_output_handler_bev,
 					eventcb_bev, s);
-			bufferevent_setwatermark(s->bev, EV_READ, 1, BUFFEREVENT_HIGH_WATERMARK);
-			bufferevent_enable(s->bev, EV_READ); /* Start reading. */
+			bufferevent_setwatermark(s->bev, EV_READ|EV_WRITE, 0, BUFFEREVENT_HIGH_WATERMARK);
+			bufferevent_enable(s->bev, EV_READ|EV_WRITE); /* Start reading. */
 		}
 	}
 
@@ -2246,13 +2317,13 @@ static int socket_input_worker(ioa_socket_handle s)
 	try_again=0;
 	try_ok=0;
 
-	stun_buffer_list_elem *elem = new_blist_elem(s->e);
+	stun_buffer_list_elem *buf_elem = new_blist_elem(s->e);
 	len = -1;
 
 	if(s->bev) { /* TCP & TLS */
 		struct evbuffer *inbuf = bufferevent_get_input(s->bev);
 		if(inbuf) {
-			ev_ssize_t blen = evbuffer_copyout(inbuf, elem->buf.buf, STUN_BUFFER_SIZE);
+			ev_ssize_t blen = evbuffer_copyout(inbuf, buf_elem->buf.buf, STUN_BUFFER_SIZE);
 			if(blen>0) {
 				int mlen = 0;
 
@@ -2262,11 +2333,11 @@ static int socket_input_worker(ioa_socket_handle s)
 				if(((s->st == TCP_SOCKET)||(s->st == TLS_SOCKET)) && ((s->sat == TCP_CLIENT_DATA_SOCKET)||(s->sat==TCP_RELAY_DATA_SOCKET))) {
 					mlen = blen;
 				} else {
-					mlen = stun_get_message_len_str(elem->buf.buf, blen, 1, &app_msg_len);
+					mlen = stun_get_message_len_str(buf_elem->buf.buf, blen, 1, &app_msg_len);
 				}
 
 				if(mlen>0 && mlen<=(int)blen) {
-					len = (int)bufferevent_read(s->bev, elem->buf.buf, mlen);
+					len = (int)bufferevent_read(s->bev, buf_elem->buf.buf, mlen);
 					if(len < 0) {
 						ret = -1;
 						s->tobeclosed = 1;
@@ -2302,12 +2373,12 @@ static int socket_input_worker(ioa_socket_handle s)
 		if(len == 0)
 			len = -1;
 	} else if(s->fd>=0){ /* UDP and DTLS */
-		ret = udp_recvfrom(s->fd, &remote_addr, &(s->local_addr), (s08bits*)(elem->buf.buf), UDP_STUN_BUFFER_SIZE, &ttl, &tos, s->e->cmsg, 0, NULL);
+		ret = udp_recvfrom(s->fd, &remote_addr, &(s->local_addr), (s08bits*)(buf_elem->buf.buf), UDP_STUN_BUFFER_SIZE, &ttl, &tos, s->e->cmsg, 0, NULL);
 		len = ret;
 		if(s->ssl && (len>0)) { /* DTLS */
 			send_ssl_backlog_buffers(s);
-			elem->buf.len = (size_t)len;
-			ret = ssl_read(s->fd, s->ssl, (ioa_network_buffer_handle)elem, ((s->e) && s->e->verbose));
+			buf_elem->buf.len = (size_t)len;
+			ret = ssl_read(s->fd, s->ssl, (ioa_network_buffer_handle)buf_elem, ((s->e) && s->e->verbose));
 			addr_cpy(&remote_addr,&(s->remote_addr));
 			if(ret < 0) {
 				len = -1;
@@ -2315,7 +2386,7 @@ static int socket_input_worker(ioa_socket_handle s)
 				s->broken = 1;
 				log_socket_event(s, "SSL read failed, to be closed",0);
 			} else {
-				len = (int)ioa_network_buffer_get_size((ioa_network_buffer_handle)elem);
+				len = (int)ioa_network_buffer_get_size((ioa_network_buffer_handle)buf_elem);
 			}
 			if((ret!=-1)&&(len>0))
 				try_again = 1;
@@ -2331,41 +2402,43 @@ static int socket_input_worker(ioa_socket_handle s)
 	}
 
 	if ((ret!=-1) && (len >= 0)) {
-		if(ioa_socket_check_bandwidth(s,(size_t)len)) {
-			if(app_msg_len)
-				elem->buf.len = app_msg_len;
-			else
-				elem->buf.len = len;
+
+		if(app_msg_len)
+			buf_elem->buf.len = app_msg_len;
+		else
+			buf_elem->buf.len = len;
+
+		if(ioa_socket_check_bandwidth(s,buf_elem,1)) {
 
 			if(s->read_cb) {
 				ioa_net_data nd;
 
 				ns_bzero(&nd,sizeof(ioa_net_data));
 				addr_cpy(&(nd.src_addr),&remote_addr);
-				nd.nbh = elem;
+				nd.nbh = buf_elem;
 				nd.recv_ttl = ttl;
 				nd.recv_tos = tos;
 
-				s->read_cb(s, IOA_EV_READ, &nd, s->read_ctx);
+				s->read_cb(s, IOA_EV_READ, &nd, s->read_ctx, 1);
 
 				if(nd.nbh)
-					free_blist_elem(s->e,elem);
+					free_blist_elem(s->e,buf_elem);
 
-				elem = NULL;
+				buf_elem = NULL;
 
 				try_ok = 1;
 
 			} else {
 				ioa_network_buffer_delete(s->e, s->defer_nbh);
-				s->defer_nbh = elem;
-				elem = NULL;
+				s->defer_nbh = buf_elem;
+				buf_elem = NULL;
 			}
 		}
 	}
 
-	if(elem) {
-		free_blist_elem(s->e,elem);
-		elem = NULL;
+	if(buf_elem) {
+		free_blist_elem(s->e,buf_elem);
+		buf_elem = NULL;
 	}
 
 	if(try_again && try_ok && !(s->done) &&
@@ -2390,8 +2463,10 @@ static void socket_input_handler(evutil_socket_t fd, short what, void* arg)
 
 	ioa_socket_handle s = (ioa_socket_handle)arg;
 
-	if(!s)
+	if(!s) {
+		read_spare_buffer(fd);
 		return;
+	}
 
 	if((s->magic != SOCKET_MAGIC)||(s->done)) {
 		read_spare_buffer(fd);
@@ -2407,6 +2482,8 @@ static void socket_input_handler(evutil_socket_t fd, short what, void* arg)
 
 	if (!ioa_socket_tobeclosed(s))
 		socket_input_worker(s);
+	else
+		read_spare_buffer(fd);
 
 	if((s->magic != SOCKET_MAGIC)||(s->done)) {
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!!%s (1) on socket, ev=%d: 0x%lx, st=%d, sat=%d\n", __FUNCTION__,(int)what,(long)s, s->st, s->sat);
@@ -2424,22 +2501,18 @@ void close_ioa_socket_after_processing_if_necessary(ioa_socket_handle s)
 		case TCP_CLIENT_DATA_SOCKET:
 		case TCP_RELAY_DATA_SOCKET:
 		{
-			tcp_connection *tc = (tcp_connection *) (s->sub_session);
+			tcp_connection *tc = s->sub_session;
 			if (tc) {
-				s->sub_session = NULL;
-				s->session = NULL;
 				delete_tcp_connection(tc);
 			}
 		}
 			break;
 		default:
 		{
-			ts_ur_super_session *ss = (ts_ur_super_session *) (s->session);
+			ts_ur_super_session *ss = s->session;
 			if (ss) {
 				turn_turnserver *server = (turn_turnserver *) ss->server;
 				if (server) {
-					s->session = NULL;
-					s->sub_session = NULL;
 					shutdown_client_connection(server, ss, 0, "general");
 				}
 			}
@@ -2448,22 +2521,111 @@ void close_ioa_socket_after_processing_if_necessary(ioa_socket_handle s)
 	}
 }
 
+static void socket_output_handler_bev(struct bufferevent *bev, void* arg)
+{
+	
+	UNUSED_ARG(bev);
+	UNUSED_ARG(arg);
+
+	if (tcp_congestion_control) {
+
+		if (bev && arg) {
+
+			ioa_socket_handle s = (ioa_socket_handle) arg;
+
+			if(s->in_write)
+				return;
+
+			if ((s->magic != SOCKET_MAGIC)||(s->done)||(bev != s->bev)) {
+				return;
+			}
+
+			if (s->tobeclosed) {
+				if (bufferevent_enabled(bev,EV_READ)) {
+					bufferevent_disable(bev,EV_READ);
+				}
+				return;
+			}
+
+			if (s->sub_session) {
+
+				if (s == s->sub_session->client_s) {
+					if (s->sub_session->peer_s && s->sub_session->peer_s->bev) {
+						if (!bufferevent_enabled(s->sub_session->peer_s->bev,
+								EV_READ)) {
+							if (is_socket_writeable(s->sub_session->peer_s,
+									STUN_BUFFER_SIZE, __FUNCTION__, 3)) {
+								bufferevent_enable(s->sub_session->peer_s->bev,EV_READ);
+								socket_input_handler_bev(
+										s->sub_session->peer_s->bev,
+										s->sub_session->peer_s);
+							}
+						}
+					}
+				} else if (s == s->sub_session->peer_s) {
+					if (s->sub_session->client_s
+							&& s->sub_session->client_s->bev) {
+						if (!bufferevent_enabled(s->sub_session->client_s->bev,
+								EV_READ)) {
+							if (is_socket_writeable(s->sub_session->client_s,
+									STUN_BUFFER_SIZE, __FUNCTION__, 4)) {
+								bufferevent_enable(s->sub_session->client_s->bev, EV_READ);
+								socket_input_handler_bev(
+										s->sub_session->client_s->bev,
+										s->sub_session->client_s);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+static int read_spare_buffer_bev(struct bufferevent *bev)
+{
+	if(bev) {
+		char some_buffer[8192];
+		bufferevent_read(bev, some_buffer, sizeof(some_buffer));
+	}
+	return 0;
+}
+
 static void socket_input_handler_bev(struct bufferevent *bev, void* arg)
 {
 
-	if (bev && arg) {
+	if (bev) {
+
+		if(!arg) {
+			read_spare_buffer_bev(bev);
+			return;
+		}
 
 		ioa_socket_handle s = (ioa_socket_handle) arg;
+
+		if(bev != s->bev) {
+			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s socket: 0x%lx: wrong bev\n", __FUNCTION__,(long)s);
+			read_spare_buffer_bev(bev);
+			return;
+		}
 
 		if((s->magic != SOCKET_MAGIC)||(s->done)) {
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!!%s on socket: 0x%lx, st=%d, sat=%d\n", __FUNCTION__, (long) s, s->st, s->sat);
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s socket: 0x%lx was closed\n", __FUNCTION__,(long)s);
+			read_spare_buffer_bev(bev);
 			return;
 		}
 
-		while (!ioa_socket_tobeclosed(s)) {
-			if (socket_input_worker(s) <= 0)
-				break;
+		{
+			size_t cycle = 0;
+			do {
+				if(ioa_socket_tobeclosed(s)) {
+					read_spare_buffer_bev(s->bev);
+					break;
+				}
+				if (socket_input_worker(s) <= 0)
+					break;
+			} while((cycle++<128) && (s->bev));
 		}
 
 		if((s->magic != SOCKET_MAGIC)||(s->done)) {
@@ -2472,33 +2634,7 @@ static void socket_input_handler_bev(struct bufferevent *bev, void* arg)
 			return;
 		}
 
-		if (ioa_socket_tobeclosed(s)) {
-			switch(s->sat) {
-			case TCP_CLIENT_DATA_SOCKET:
-			case TCP_RELAY_DATA_SOCKET:
-			{
-				tcp_connection *tc = (tcp_connection *)(s->sub_session);
-				if(tc) {
-					s->sub_session = NULL;
-					s->session = NULL;
-					delete_tcp_connection(tc);
-				}
-			}
-			break;
-			default:
-			{
-				ts_ur_super_session *ss = (ts_ur_super_session *)(s->session);
-				if (ss) {
-					turn_turnserver *server = (turn_turnserver *)ss->server;
-					if (server) {
-						s->session=NULL;
-						s->sub_session=NULL;
-						shutdown_client_connection(server, ss, 0, "TCP socket buffer operation error (input handler)");
-					}
-				}
-			}
-			}
-		}
+		close_ioa_socket_after_processing_if_necessary(s);
 	}
 }
 
@@ -2529,42 +2665,49 @@ static void eventcb_bev(struct bufferevent *bev, short events, void *arg)
 				return;
 			}
 
-			if (s->connected && (events & BEV_EVENT_ERROR) && (!(events & BEV_EVENT_EOF))) {
-				log_socket_event(s, "socket connection error",1);
-				return;
-			}
+			if (events & BEV_EVENT_ERROR)
+				s->broken = 1;
+
+			s->tobeclosed = 1;
 
 			switch (s->sat){
 			case TCP_CLIENT_DATA_SOCKET:
 			case TCP_RELAY_DATA_SOCKET:
 			{
-				tcp_connection *tc = (tcp_connection *) (s->sub_session);
+				tcp_connection *tc = s->sub_session;
 				if (tc) {
-					s->sub_session = NULL;
-					s->session = NULL;
 					delete_tcp_connection(tc);
 				}
 			}
 				break;
 			default:
 			{
-				ts_ur_super_session *ss = (ts_ur_super_session *) (s->session);
+				ts_ur_super_session *ss = s->session;
 				if (ss) {
 					turn_turnserver *server = (turn_turnserver *) ss->server;
 					if (server) {
 
 
 						{
+							char sraddr[129]="\0";
+							addr_to_string(&(s->remote_addr),(u08bits*)sraddr);
 							if (events & BEV_EVENT_EOF) {
-								TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: socket closed remotely\n",(unsigned long long)(ss->id));
-								s->session = NULL;
-								s->sub_session = NULL;
-								shutdown_client_connection(server, ss, 0, "TCP connection closed by peer (callback)");
+								if(server->verbose)
+									TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: TCP socket closed remotely %s\n",(unsigned long long)(ss->id),sraddr);
+								if(s == ss->client_session.s) {
+									shutdown_client_connection(server, ss, 0, "TCP connection closed by client (callback)");
+								} else if(s == ss->alloc.relay_session.s) {
+									shutdown_client_connection(server, ss, 0, "TCP connection closed by peer (callback)");
+								} else {
+									shutdown_client_connection(server, ss, 0, "TCP connection closed by remote party (callback)");
+								}
 							} else if (events & BEV_EVENT_ERROR) {
-								TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"session %018llu: socket error: %s\n",(unsigned long long)(ss->id),
-												evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
-								s->session = NULL;
-								s->sub_session = NULL;
+								if(EVUTIL_SOCKET_ERROR()) {
+									TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR,"session %018llu: TCP socket error: %s %s\n",(unsigned long long)(ss->id),
+												evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()), sraddr);
+								} else if(server->verbose) {
+									TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: TCP socket disconnected: %s\n",(unsigned long long)(ss->id),sraddr);
+								}
 								shutdown_client_connection(server, ss, 0, "TCP socket buffer operation error (callback)");
 							 }
 						}
@@ -2709,14 +2852,14 @@ static int send_ssl_backlog_buffers(ioa_socket_handle s)
 {
 	int ret = 0;
 	if(s) {
-		stun_buffer_list_elem *elem = s->bufs.head;
-		while(elem) {
-			int rc = ssl_send(s, (s08bits*)elem->buf.buf + elem->buf.offset - elem->buf.coffset, (size_t)elem->buf.len, ((s->e) && s->e->verbose));
+		stun_buffer_list_elem *buf_elem = s->bufs.head;
+		while(buf_elem) {
+			int rc = ssl_send(s, (s08bits*)buf_elem->buf.buf + buf_elem->buf.offset - buf_elem->buf.coffset, (size_t)buf_elem->buf.len, ((s->e) && s->e->verbose));
 			if(rc<1)
 				break;
 			++ret;
 			pop_elem_from_buffer_list(&(s->bufs));
-			elem = s->bufs.head;
+			buf_elem = s->bufs.head;
 		}
 	}
 
@@ -2815,8 +2958,10 @@ int send_data_from_ioa_socket_nbh(ioa_socket_handle s, ioa_addr* dest_addr,
 {
 	int ret = -1;
 
-	if(!s)
+	if(!s) {
+		ioa_network_buffer_delete(NULL, nbh);
 		return -1;
+	}
 
 	if (s->done || (s->fd == -1)) {
 		TURN_LOG_FUNC(
@@ -2827,7 +2972,7 @@ int send_data_from_ioa_socket_nbh(ioa_socket_handle s, ioa_addr* dest_addr,
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s socket: 0x%lx was closed\n", __FUNCTION__,(long)s);
 
 	} else if (nbh) {
-		if(!ioa_socket_check_bandwidth(s,ioa_network_buffer_get_size(nbh))) {
+		if(!ioa_socket_check_bandwidth(s,nbh,0)) {
 			/* Bandwidth exhausted, we pretend everything is fine: */
 			ret = (int)(ioa_network_buffer_get_size(nbh));
 		} else {
@@ -2849,18 +2994,28 @@ int send_data_from_ioa_socket_nbh(ioa_socket_handle s, ioa_addr* dest_addr,
 						}
 
 						if (!(s->tobeclosed)) {
-							if (bufferevent_write(
-										s->bev,
+
+							ret = (int) ioa_network_buffer_get_size(nbh);
+
+							if (!tcp_congestion_control || is_socket_writeable(
+									s, (size_t) ret, __FUNCTION__, 2)) {
+								s->in_write = 1;
+								if (bufferevent_write(s->bev,
 										ioa_network_buffer_data(nbh),
-										ioa_network_buffer_get_size(nbh))
-											< 0) {
-								ret = -1;
-								perror("bufev send");
-								log_socket_event(s, "socket write failed, to be closed",1);
-								s->tobeclosed = 1;
-								s->broken = 1;
+										ioa_network_buffer_get_size(nbh)) < 0) {
+									ret = -1;
+									perror("bufev send");
+									log_socket_event(
+											s,
+											"socket write failed, to be closed",
+											1);
+									s->tobeclosed = 1;
+									s->broken = 1;
+								}
+								s->in_write = 0;
 							} else {
-								ret = (int) ioa_network_buffer_get_size(nbh);
+								//drop the packet
+								;
 							}
 						}
 					} else if (s->ssl) {
@@ -2970,11 +3125,11 @@ int register_callback_on_ioa_socket(ioa_engine_handle e, ioa_socket_handle s, in
 					} else {
 						s->bev = bufferevent_socket_new(s->e->event_base,
 										s->fd,
-										BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS);
-						bufferevent_setcb(s->bev, socket_input_handler_bev, NULL,
+										TURN_BUFFEREVENTS_OPTIONS);
+						bufferevent_setcb(s->bev, socket_input_handler_bev, socket_output_handler_bev,
 							eventcb_bev, s);
-						bufferevent_setwatermark(s->bev, EV_READ, 1, BUFFEREVENT_HIGH_WATERMARK);
-						bufferevent_enable(s->bev, EV_READ); /* Start reading. */
+						bufferevent_setwatermark(s->bev, EV_READ|EV_WRITE, 0, BUFFEREVENT_HIGH_WATERMARK);
+						bufferevent_enable(s->bev, EV_READ|EV_WRITE); /* Start reading. */
 					}
 					break;
 				case TLS_SOCKET:
@@ -2988,24 +3143,24 @@ int register_callback_on_ioa_socket(ioa_engine_handle e, ioa_socket_handle s, in
 #if !defined(TURN_NO_TLS)
 						if(!(s->ssl)) {
 							//??? how we can get to this point ???
-							s->ssl = SSL_new(e->tls_ctx_ssl23);
+							set_socket_ssl(s,SSL_new(e->tls_ctx_ssl23));
 							STRCPY(s->orig_ctx_type,"SSLv23");
 							s->bev = bufferevent_openssl_socket_new(s->e->event_base,
 											s->fd,
 											s->ssl,
 											BUFFEREVENT_SSL_ACCEPTING,
-											BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS);
+											TURN_BUFFEREVENTS_OPTIONS);
 						} else {
 							s->bev = bufferevent_openssl_socket_new(s->e->event_base,
 											s->fd,
 											s->ssl,
 											BUFFEREVENT_SSL_OPEN,
-											BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS);
+											TURN_BUFFEREVENTS_OPTIONS);
 						}
-						bufferevent_setcb(s->bev, socket_input_handler_bev, NULL,
+						bufferevent_setcb(s->bev, socket_input_handler_bev, socket_output_handler_bev,
 							eventcb_bev, s);
-						bufferevent_setwatermark(s->bev, EV_READ, 1, BUFFEREVENT_HIGH_WATERMARK);
-						bufferevent_enable(s->bev, EV_READ); /* Start reading. */
+						bufferevent_setwatermark(s->bev, EV_READ|EV_WRITE, 0, BUFFEREVENT_HIGH_WATERMARK);
+						bufferevent_enable(s->bev, EV_READ|EV_WRITE); /* Start reading. */
 #endif
 					}
 					break;
@@ -3035,21 +3190,23 @@ int ioa_socket_tobeclosed(ioa_socket_handle s)
 		}
 
 		if(s->done) {
-			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s: ceck on already closed socket: 0x%lx, st=%d, sat=%d\n",__FUNCTION__,(long)s,s->st,s->sat);
+			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s: check on already closed socket: 0x%lx, st=%d, sat=%d\n",__FUNCTION__,(long)s,s->st,s->sat);
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "!!! %s socket: 0x%lx was closed\n", __FUNCTION__,(long)s);
 			return 1;
 		}
-		if(s->broken) {
+		if(s->tobeclosed) {
+			return 1;
+		} else if(s->broken) {
+			s->tobeclosed = 1;
 			log_socket_event(s, "socket broken", 0);
 			return 1;
-		} else if(s->tobeclosed) {
-			log_socket_event(s, "socket to be closed", 0);
-			return 1;
 		} else if(s->fd < 0) {
+			s->tobeclosed = 1;
 			log_socket_event(s, "socket fd<0", 0);
 			return 1;
 		} else if(s->ssl) {
 			if(SSL_get_shutdown(s->ssl)) {
+				s->tobeclosed = 1;
 				log_socket_event(s, "socket SSL shutdown", 0);
 				return 1;
 			}
@@ -3069,11 +3226,11 @@ void set_ioa_socket_tobeclosed(ioa_socket_handle s)
  */
 ioa_network_buffer_handle ioa_network_buffer_allocate(ioa_engine_handle e)
 {
-	stun_buffer_list_elem *elem = new_blist_elem(e);
-	elem->buf.len = 0;
-	elem->buf.offset = 0;
-	elem->buf.coffset = 0;
-	return elem;
+	stun_buffer_list_elem *buf_elem = new_blist_elem(e);
+	buf_elem->buf.len = 0;
+	buf_elem->buf.offset = 0;
+	buf_elem->buf.coffset = 0;
+	return buf_elem;
 }
 
 /* We do not use special header in this simple implementation */
@@ -3084,8 +3241,8 @@ void ioa_network_buffer_header_init(ioa_network_buffer_handle nbh)
 
 u08bits *ioa_network_buffer_data(ioa_network_buffer_handle nbh)
 {
-	stun_buffer_list_elem *elem = (stun_buffer_list_elem *)nbh;
-	return elem->buf.buf + elem->buf.offset - elem->buf.coffset;
+	stun_buffer_list_elem *buf_elem = (stun_buffer_list_elem *)nbh;
+	return buf_elem->buf.buf + buf_elem->buf.offset - buf_elem->buf.coffset;
 }
 
 size_t ioa_network_buffer_get_size(ioa_network_buffer_handle nbh)
@@ -3093,8 +3250,8 @@ size_t ioa_network_buffer_get_size(ioa_network_buffer_handle nbh)
 	if(!nbh)
 		return 0;
 	else {
-		stun_buffer_list_elem *elem = (stun_buffer_list_elem *)nbh;
-		return (size_t)(elem->buf.len);
+		stun_buffer_list_elem *buf_elem = (stun_buffer_list_elem *)nbh;
+		return (size_t)(buf_elem->buf.len);
 	}
 }
 
@@ -3103,9 +3260,9 @@ size_t ioa_network_buffer_get_capacity(ioa_network_buffer_handle nbh)
 	if(!nbh)
 		return 0;
 	else {
-		stun_buffer_list_elem *elem = (stun_buffer_list_elem *)nbh;
-		if(elem->buf.offset < STUN_BUFFER_SIZE) {
-			return (STUN_BUFFER_SIZE - elem->buf.offset);
+		stun_buffer_list_elem *buf_elem = (stun_buffer_list_elem *)nbh;
+		if(buf_elem->buf.offset < STUN_BUFFER_SIZE) {
+			return (STUN_BUFFER_SIZE - buf_elem->buf.offset);
 		}
 		return 0;
 	}
@@ -3118,41 +3275,41 @@ size_t ioa_network_buffer_get_capacity_udp(void)
 
 void ioa_network_buffer_set_size(ioa_network_buffer_handle nbh, size_t len)
 {
-  stun_buffer_list_elem *elem = (stun_buffer_list_elem *)nbh;
-  elem->buf.len=(size_t)len;
+  stun_buffer_list_elem *buf_elem = (stun_buffer_list_elem *)nbh;
+  buf_elem->buf.len=(size_t)len;
 }
 
 void ioa_network_buffer_add_offset_size(ioa_network_buffer_handle nbh, u16bits offset, u08bits coffset, size_t len)
 {
-  stun_buffer_list_elem *elem = (stun_buffer_list_elem *)nbh;
-  elem->buf.len=(size_t)len;
-  elem->buf.offset += offset;
-  elem->buf.coffset += coffset;
+  stun_buffer_list_elem *buf_elem = (stun_buffer_list_elem *)nbh;
+  buf_elem->buf.len=(size_t)len;
+  buf_elem->buf.offset += offset;
+  buf_elem->buf.coffset += coffset;
 
-  if((elem->buf.offset + elem->buf.len - elem->buf.coffset)>=sizeof(elem->buf.buf) ||
-	(elem->buf.offset + sizeof(elem->buf.channel) < elem->buf.coffset)
+  if((buf_elem->buf.offset + buf_elem->buf.len - buf_elem->buf.coffset)>=sizeof(buf_elem->buf.buf) ||
+	(buf_elem->buf.offset + sizeof(buf_elem->buf.channel) < buf_elem->buf.coffset)
   ) {
-	  elem->buf.coffset = 0;
-	  elem->buf.len = 0;
-	  elem->buf.offset = 0;
+	  buf_elem->buf.coffset = 0;
+	  buf_elem->buf.len = 0;
+	  buf_elem->buf.offset = 0;
   }
 }
 
 u16bits ioa_network_buffer_get_offset(ioa_network_buffer_handle nbh)
 {
-  stun_buffer_list_elem *elem = (stun_buffer_list_elem *)nbh;
-  return elem->buf.offset;
+  stun_buffer_list_elem *buf_elem = (stun_buffer_list_elem *)nbh;
+  return buf_elem->buf.offset;
 }
 
 u08bits ioa_network_buffer_get_coffset(ioa_network_buffer_handle nbh)
 {
-  stun_buffer_list_elem *elem = (stun_buffer_list_elem *)nbh;
-  return elem->buf.coffset;
+  stun_buffer_list_elem *buf_elem = (stun_buffer_list_elem *)nbh;
+  return buf_elem->buf.coffset;
 }
 
 void ioa_network_buffer_delete(ioa_engine_handle e, ioa_network_buffer_handle nbh) {
-  stun_buffer_list_elem *elem = (stun_buffer_list_elem *)nbh;
-  free_blist_elem(e,elem);
+  stun_buffer_list_elem *buf_elem = (stun_buffer_list_elem *)nbh;
+  free_blist_elem(e,buf_elem);
 }
 
 /////////// REPORTING STATUS /////////////////////
@@ -3168,10 +3325,17 @@ void turn_report_allocation_set(void *a, turn_time_t lifetime, int refresh)
 			turn_turnserver *server = (turn_turnserver*)ss->server;
 			if(server) {
 				ioa_engine_handle e = turn_server_get_engine(server);
-				if(e && e->verbose) {
+				if(e && e->verbose && ss->client_session.s) {
 					if(ss->client_session.s->ssl) {
-						TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: %s, username=<%s>, lifetime=%lu, cipher=%s, method=%s (%s)\n", (unsigned long long)ss->id, status, (char*)ss->username, (unsigned long)lifetime, SSL_get_cipher(ss->client_session.s->ssl),
-							turn_get_ssl_method(ss->client_session.s->ssl, ss->client_session.s->orig_ctx_type),ss->client_session.s->orig_ctx_type);
+					  TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,
+							"session %018llu: %s, username=<%s>, lifetime=%lu, cipher=%s, method=%s (%s)\n", 
+							(unsigned long long)ss->id, 
+							status, 
+							(char*)ss->username, 
+							(unsigned long)lifetime, 
+							SSL_get_cipher(ss->client_session.s->ssl),
+							turn_get_ssl_method(ss->client_session.s->ssl, ss->client_session.s->orig_ctx_type),
+							ss->client_session.s->orig_ctx_type);
 					} else {
 						TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"session %018llu: %s, username=<%s>, lifetime=%lu\n", (unsigned long long)ss->id, status, (char*)ss->username, (unsigned long)lifetime);
 					}
@@ -3283,12 +3447,12 @@ const char* get_ioa_socket_tls_method(ioa_socket_handle s)
 
 ///////////// Super Memory Region //////////////
 
-#define TURN_SM_SIZE (1024<<12)
+#define TURN_SM_SIZE (1024<<11)
 
 struct _super_memory {
 	pthread_mutex_t mutex_sm;
-	char *super_memory;
-	size_t sm_allocated;
+	char **super_memory;
+	size_t *sm_allocated;
 	size_t sm_total_sz;
 	size_t sm_chunk;
 	u32bits id;
@@ -3298,14 +3462,21 @@ static void init_super_memory_region(super_memory_t *r)
 {
 	if(r) {
 		ns_bzero(r,sizeof(super_memory_t));
-		r->super_memory = (char*)malloc(TURN_SM_SIZE);
-		ns_bzero(r->super_memory,TURN_SM_SIZE);
-		pthread_mutex_init(&r->mutex_sm, NULL);
-		r->sm_allocated = 0;
+
+		r->super_memory = (char**)turn_malloc(sizeof(char*));
+		r->super_memory[0] = (char*)turn_malloc(TURN_SM_SIZE);
+		ns_bzero(r->super_memory[0],TURN_SM_SIZE);
+
+		r->sm_allocated = (size_t*)turn_malloc(sizeof(size_t*));
+		r->sm_allocated[0] = 0;
+
 		r->sm_total_sz = TURN_SM_SIZE;
 		r->sm_chunk = 0;
+
 		while(r->id == 0)
 			r->id = (u32bits)random();
+
+		pthread_mutex_init(&r->mutex_sm, NULL);
 	}
 }
 
@@ -3316,7 +3487,7 @@ void init_super_memory(void)
 
 super_memory_t* new_super_memory_region(void)
 {
-	super_memory_t* r = (super_memory_t*)malloc(sizeof(super_memory_t));
+	super_memory_t* r = (super_memory_t*)turn_malloc(sizeof(super_memory_t));
 	init_super_memory_region(r);
 	return r;
 }
@@ -3327,10 +3498,13 @@ void* allocate_super_memory_region_func(super_memory_t *r, size_t size, const ch
 	UNUSED_ARG(func);
 	UNUSED_ARG(line);
 
-	if(!r)
-		return malloc(size);
-
 	void *ret = NULL;
+
+	if(!r) {
+		ret = turn_malloc(size);
+		ns_bzero(ret, size);
+		return ret;
+	}
 
 	pthread_mutex_lock(&r->mutex_sm);
 
@@ -3338,31 +3512,43 @@ void* allocate_super_memory_region_func(super_memory_t *r, size_t size, const ch
 
 	if(size>=TURN_SM_SIZE) {
 
-		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"(%s:%s:%d): Size too large for super memory: region id = %u, chunk=%lu, total=%lu, allocated=%lu, want=%lu\n",file,func,line,(unsigned int)r->id, (unsigned long)r->sm_chunk, (unsigned long)r->sm_total_sz, (unsigned long)r->sm_allocated,(unsigned long)size);
+		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"(%s:%s:%d): Size too large for super memory: region id = %u, chunk=%lu, total=%lu, allocated=%lu, want=%lu\n",file,func,line,(unsigned int)r->id, (unsigned long)r->sm_chunk, (unsigned long)r->sm_total_sz, (unsigned long)r->sm_allocated[r->sm_chunk],(unsigned long)size);
 
 	} else {
 
-		size_t left = (size_t)r->sm_total_sz - r->sm_allocated;
+		size_t i = 0;
+		char *region = NULL;
+		size_t *rsz = NULL;
+		for(i=0;i<=r->sm_chunk;++i) {
 
-		if(left<size) {
+			size_t left = (size_t)r->sm_total_sz - r->sm_allocated[i];
 
-			r->super_memory = (char*)malloc(TURN_SM_SIZE);
-			ns_bzero(r->super_memory,TURN_SM_SIZE);
-			r->sm_allocated = 0;
-			r->sm_total_sz = TURN_SM_SIZE;
+			if(left<size+sizeof(void*)) {
+				continue;
+			} else {
+				region = r->super_memory[i];
+				rsz = r->sm_allocated + i;
+				break;
+			}
+		}
 
+		if(!region) {
 			r->sm_chunk += 1;
+			r->super_memory = (char**)turn_realloc(r->super_memory,0, (r->sm_chunk+1) * sizeof(char*));
+			r->super_memory[r->sm_chunk] = (char*)turn_malloc(TURN_SM_SIZE);
+			ns_bzero(r->super_memory[r->sm_chunk],TURN_SM_SIZE);
+			r->sm_allocated = (size_t*)turn_realloc(r->sm_allocated,0,(r->sm_chunk+1) * sizeof(size_t*));
+			r->sm_allocated[r->sm_chunk] = 0;
+			region = r->super_memory[r->sm_chunk];
+			rsz = r->sm_allocated + r->sm_chunk;
 		}
 
 		{
-			if(r->sm_chunk || !(r->id))
-				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"(%s:%s:%d): allocated super memory: region id = %u, chunk=%lu, total=%lu, allocated=%lu, want=%lu\n",file,func,line,(unsigned int)r->id, (unsigned long)r->sm_chunk, (unsigned long)r->sm_total_sz, (unsigned long)r->sm_allocated,(unsigned long)size);
-
-			char* ptr = r->super_memory + r->sm_allocated;
+			char* ptr = region + *rsz;
 
 			ns_bzero(ptr, size);
 
-			r->sm_allocated += size;
+			*rsz += size;
 
 			ret = ptr;
 		}
@@ -3370,8 +3556,10 @@ void* allocate_super_memory_region_func(super_memory_t *r, size_t size, const ch
 
 	pthread_mutex_unlock(&r->mutex_sm);
 
-	if(!ret)
-		ret = malloc(size);
+	if(!ret) {
+		ret = turn_malloc(size);
+		ns_bzero(ret, size);
+	}
 
 	return ret;
 }

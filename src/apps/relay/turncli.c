@@ -121,10 +121,14 @@ static const char *CLI_HELP_STR[] =
    "",
    "  pu [udp|tcp|dtls|tls]- print current users",
    "",
+   "  lr - log reset",
+   "",
    "  aas ip[:port} - add an alternate server reference",
    "  das ip[:port] - delete an alternate server reference",
    "  atas ip[:port] - add a TLS alternate server reference",
    "  dtas ip[:port] - delete a TLS alternate server reference",
+   "",
+   "  cs <session-id> - cancel session, forcefully"
    "",
    NULL};
 
@@ -190,6 +194,14 @@ static void myprintf(struct cli_session *cs, const char *format, ...)
 			telnet_vprintf(cs->ts, format, args);
 		}
 		va_end (args);
+	}
+}
+
+static void log_reset(struct cli_session* cs)
+{
+	if(cs) {
+	  reset_rtpprintf();
+	  myprintf(cs,"  log reset done\n");
 	}
 }
 
@@ -429,26 +441,26 @@ static int print_session(ur_map_key_type key, ur_map_value_type value, void *arg
 		struct turn_session_info *tsi = (struct turn_session_info *)value;
 
 		if(csarg->users) {
+			const char *pn=csarg->pname;
+			if(pn[0]) {
+				if(!strcmp(pn,"TLS") || !strcmp(pn,"tls") || !strcmp(pn,"Tls")) {
+					if(tsi->client_protocol != TLS_SOCKET)
+						return 0;
+				} else if(!strcmp(pn,"DTLS") || !strcmp(pn,"dtls") || !strcmp(pn,"Dtls")) {
+					if(tsi->client_protocol != DTLS_SOCKET)
+						return 0;
+				} else if(!strcmp(pn,"TCP") || !strcmp(pn,"tcp") || !strcmp(pn,"Tcp")) {
+					if(tsi->client_protocol != TCP_SOCKET)
+						return 0;
+				} else if(!strcmp(pn,"UDP") || !strcmp(pn,"udp") || !strcmp(pn,"Udp")) {
+					if(tsi->client_protocol != UDP_SOCKET)
+						return 0;
+				} else {
+					return 0;
+				}
+			}
 			ur_string_map_value_type value;
 			if(!ur_string_map_get(csarg->users, (ur_string_map_key_type)(char*)tsi->username, &value)) {
-				const char *pn=csarg->pname;
-				if(pn[0]) {
-					if(!strcmp(pn,"TLS") || !strcmp(pn,"tls") || !strcmp(pn,"Tls")) {
-						if(tsi->client_protocol != TLS_SOCKET)
-							return 0;
-					} else if(!strcmp(pn,"DTLS") || !strcmp(pn,"dtls") || !strcmp(pn,"Dtls")) {
-						if(tsi->client_protocol != DTLS_SOCKET)
-							return 0;
-					} else if(!strcmp(pn,"TCP") || !strcmp(pn,"tcp") || !strcmp(pn,"Tcp")) {
-						if(tsi->client_protocol != TCP_SOCKET)
-							return 0;
-					} else if(!strcmp(pn,"UDP") || !strcmp(pn,"udp") || !strcmp(pn,"Udp")) {
-						if(tsi->client_protocol != UDP_SOCKET)
-							return 0;
-					} else {
-						return 0;
-					}
-				}
 				value = (ur_string_map_value_type)csarg->users_number;
 				csarg->users_number += 1;
 				csarg->user_counters = (size_t*)turn_realloc(csarg->user_counters,
@@ -457,7 +469,7 @@ static int print_session(ur_map_key_type key, ur_map_value_type value, void *arg
 				csarg->user_names = (char**)turn_realloc(csarg->user_names,
 						(size_t)value * sizeof(char*),
 						csarg->users_number * sizeof(char*));
-				csarg->user_names[(size_t)value] = strdup((char*)tsi->username);
+				csarg->user_names[(size_t)value] = turn_strdup((char*)tsi->username);
 				csarg->user_counters[(size_t)value] = 0;
 				ur_string_map_put(csarg->users, (ur_string_map_key_type)(char*)tsi->username, value);
 			}
@@ -504,11 +516,6 @@ static int print_session(ur_map_key_type key, ur_map_value_type value, void *arg
 				}
 				myprintf(cs,"      fingerprints enforced: %s\n",get_flag(tsi->enforce_fingerprints));
 				myprintf(cs,"      mobile: %s\n",get_flag(tsi->is_mobile));
-				myprintf(cs,"      SHA256: %s\n",get_flag(tsi->shatype));
-				if(turn_params.shatype == SHATYPE_SHA1)
-					myprintf(cs,"      SHA type: SHA1\n");
-				else if(turn_params.shatype == SHATYPE_SHA256)
-					myprintf(cs,"      SHA type: SHA256\n");
 				if(tsi->tls_method[0]) {
 					myprintf(cs,"      TLS method: %s\n",tsi->tls_method);
 					myprintf(cs,"      TLS cipher: %s\n",tsi->tls_cipher);
@@ -537,6 +544,14 @@ static int print_session(ur_map_key_type key, ur_map_value_type value, void *arg
 		csarg->counter += 1;
 	}
 	return 0;
+}
+
+static void cancel_session(struct cli_session* cs, const char* ssid)
+{
+	if(cs && cs->ts && ssid && *ssid) {
+		turnsession_id sid = strtoull(ssid,NULL,10);
+		send_session_cancellation_to_relay(sid);
+	}
 }
 
 static void print_sessions(struct cli_session* cs, const char* pn, int exact_match, int print_users)
@@ -662,11 +677,10 @@ static void cli_print_configuration(struct cli_session* cs)
 		cli_print_str(cs,turn_params.cert_file,"Certificate file",0);
 		cli_print_str(cs,turn_params.pkey_file,"Private Key file",0);
 
-		if(turn_params.shatype == SHATYPE_SHA1)
-			cli_print_str(cs,"SHA1 and SHA256","allowed SHA types",0);
-		else if(turn_params.shatype == SHATYPE_SHA256)
-					cli_print_str(cs,"SHA256 only","allowed SHA types",0);
-
+		if(turn_params.shatype == SHATYPE_SHA256)
+					cli_print_str(cs,"SHA256","SHA type",0);
+				else
+					cli_print_str(cs,"SHA1","SHA type",0);
 		myprintf(cs,"\n");
 
 		cli_print_str_array(cs,turn_params.listener.addrs,turn_params.listener.addrs_number,"Listener addr",0);
@@ -678,12 +692,6 @@ static void cli_print_configuration(struct cli_session* cs)
 		cli_print_flag(cs,turn_params.no_tcp,"no-tcp",0);
 		cli_print_flag(cs,turn_params.no_dtls,"no-dtls",0);
 		cli_print_flag(cs,turn_params.no_tls,"no-tls",0);
-
-#ifndef OPENSSL_NO_SSL2
-		cli_print_flag(cs,(!turn_params.no_sslv2 && !turn_params.no_tls),"SSLv2",0);
-#else
-		cli_print_flag(cs,0,"SSLv2",0);
-#endif
 
 		cli_print_flag(cs,(!turn_params.no_sslv3 && !turn_params.no_tls),"SSLv3",0);
 		cli_print_flag(cs,(!turn_params.no_tlsv1 && !turn_params.no_tls),"TLSv1.0",0);
@@ -820,7 +828,7 @@ static void close_cli_session(struct cli_session* cs)
 		}
 
 		if(cs->bev) {
-			bufferevent_flush(cs->bev,EV_WRITE,BEV_FLUSH);
+			bufferevent_flush(cs->bev,EV_READ|EV_WRITE,BEV_FLUSH);
 			bufferevent_disable(cs->bev,EV_READ|EV_WRITE);
 			bufferevent_free(cs->bev);
 			cs->bev=NULL;
@@ -876,7 +884,7 @@ static int run_cli_input(struct cli_session* cs, const char *buf0, unsigned int 
 
 	if(cs && buf0 && cs->ts && cs->bev) {
 
-		char *buf = (char*)malloc(len+1);
+		char *buf = (char*)turn_malloc(len+1);
 		ns_bcopy(buf0,buf,len);
 		buf[len]=0;
 
@@ -969,6 +977,12 @@ static int run_cli_input(struct cli_session* cs, const char *buf0, unsigned int 
 			} else if(strstr(cmd,"ps") == cmd) {
 				print_sessions(cs,cmd+2,1,0);
 				type_cli_cursor(cs);
+			} else if(strstr(cmd,"cs ") == cmd) {
+				cancel_session(cs,cmd+3);
+				type_cli_cursor(cs);
+			} else if(strstr(cmd,"lr") == cmd) {
+				log_reset(cs);
+				type_cli_cursor(cs);
 			} else if(strstr(cmd,"cc ") == cmd) {
 				change_cli_param(cs,cmd+3);
 				type_cli_cursor(cs);
@@ -996,7 +1010,7 @@ static int run_cli_input(struct cli_session* cs, const char *buf0, unsigned int 
 			type_cli_cursor(cs);
 		}
 
-		free(buf);
+		turn_free(buf,len+1);
 	}
 
 	return ret;
@@ -1090,10 +1104,10 @@ static void cliserver_input_handler(struct evconnlistener *l, evutil_socket_t fd
 
 	clisession->bev = bufferevent_socket_new(cliserver.event_base,
 					fd,
-					BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS);
+					TURN_BUFFEREVENTS_OPTIONS);
 	bufferevent_setcb(clisession->bev, cli_socket_input_handler_bev, NULL,
 			cli_eventcb_bev, clisession);
-	bufferevent_setwatermark(clisession->bev, EV_READ, 1, BUFFEREVENT_HIGH_WATERMARK);
+	bufferevent_setwatermark(clisession->bev, EV_READ|EV_WRITE, 0, BUFFEREVENT_HIGH_WATERMARK);
 	bufferevent_enable(clisession->bev, EV_READ); /* Start reading. */
 
 	clisession->ts = telnet_init(cli_telopts, cli_telnet_event_handler, 0, clisession);
@@ -1121,11 +1135,8 @@ void setup_cli_thread(void)
 	TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"IO method (cli thread): %s\n",event_base_get_method(cliserver.event_base));
 
 	struct bufferevent *pair[2];
-	int opts = BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS;
 
-	opts |= BEV_OPT_THREADSAFE;
-
-	bufferevent_pair_new(cliserver.event_base, opts, pair);
+	bufferevent_pair_new(cliserver.event_base, TURN_BUFFEREVENTS_OPTIONS, pair);
 	cliserver.in_buf = pair[0];
 	cliserver.out_buf = pair[1];
 	bufferevent_setcb(cliserver.in_buf, cli_server_receive_message, NULL, NULL, &cliserver);

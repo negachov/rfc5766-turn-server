@@ -1,8 +1,192 @@
-03/04/2014 Oleg Moskalenko <mom040267@gmail.com>
+2/28/2015 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.5.6 'Marshal West':
+	- bandwidth control fixed;
+	- STUN/TURN control traffic counted separately from data traffic,
+	for the sake of the bandwidth control;
+	- higher bandwidth limit capacity on 64 bits systems;
+	- REST API docs fixed;
+
+2/3/2015 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.5.5 'Marshal West':
+	- hostname-to-ip-address resolution fixed;
+	- TRANSPORT attribute handling fixed;
+	- TOS (DiffServer) and TTL IP header field handling fixed;
+	- peer logging added;
+
+1/26/2015 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.5.4 'Marshal West':
+	- SSLv2 support removed;
+	- OpenSSL 1.1.0 support added.
+	
+12/14/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.5.3 'Marshal West':
+	- Redis read message queue backlog fixed.
+	- Typos fixed in the docs.
+	
+11/10/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.5.2 'Marshal West':
+	- TLS connection procedure improved in uclient test program.
+	- Reliability improvements (Issue 141).
+	- external address mapping fixes for Amazon EC2.
+	- docs fixes.
+
+11/07/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.5.1 'Marshal West':
+	- Request re-transmission implemented in uclient test program.
+	- TLS connection procedure improved in uclient test program.
+
+10/31/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.4.6 'Marshal West':
+	- Relay RTCP sockets ports allocation fixed.
+	- SSL renegotiation callback fixed.
+	- List of libraries cleaned.
+	- Debian UFW file added to the Debian package.
+
+10/16/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.4.5 'Marshal West':
+	- Mobile sessions authentication improved.
+	- Authentication code cleaning.
+	- Quota allocation fixed.
+	- Core dump fixed.
+	- Memory code cleaning.
+	- Logging code cleaning.
+	- TCP/TLS tests improved.
+	- relay RTCP sockets ports allocation fixed.
+	
+09/05/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.4.4 'Marshal West':
+	- TLS renegotiation DoS attack prevention implemented (Issue 136);
+	- FQDN is allowed as a relay-ip or a listener-ip parameter
+	(patch provided by Iñaki Baz Castillo).
+	
+09/01/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.4.3 'Marshal West':
+	- Redis DB user key database operation fixed.
+	- SHA-256 memory leak fixed.
+	- Mobility ticket retransmission fixed.
+	
+08/14/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.4.2 'Marshal West':
+	- MySQL SSL connection support.
+	- Crash fixed when incorrect DB connection string.
+	- Minor docs fixes.
+	
+07/29/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.4.1 'Marshal West':
+	- Server-side forceful session cancellation implemented
+	(in telnet console).
+	
+07/18/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.96 'Marshal West':
+	- TCP 6062 relay connection fix.
+	- "pu" CLI command fixed.
+	- Some crash conditions fixed.
+	
+07/11/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.95 'Marshal West':
+	- working on compilation warnings.
+	- Allocation mismatch condition fixed.
+	- STUN BINDING response fixed in the case of -X (external address) option.
+	
+06/13/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.94 'Marshal West':
+	- Redis DB connection status fixed (Issue 129).
+	- SIGHUP for logfile reset implemented
+	(Gustavo Garcia suggestion).
+	- log reset command in CLI added.
+	- Some error code corrections:
+	    * "Mobility forbidden" error changed, to value 405.
+	    * "Wrong credentials" situation is now treated as error 441.
+
+06/03/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.92 'Marshal West':
+	-Issues 126, 127 and 128 fixed.
+
+06/02/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.91 'Marshal West':
+	-Issue 128 (sigfault in RFC 6062 TCP operations) fixed.
+
+05/30/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.9 'Marshal West':
+	- ephemeral REST API credentials fixed in RFC 6062 TCP communications
+	(Issue 126 and Issue 127).
+	- Auth code cleaning.
+	- Password change in the database of an active session is supported.
+	
+05/07/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.8 'Marshal West':
+	- Code cleaning (compilation warnings, etc).
+	- TLS/DTLS log messages fixed.
+	- uclient performance improvements.
+	- channel function place holders  defined for kernel-level calls.
+
+04/23/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.7 'Marshal West':
+	- Performance and socket logging fix (improved) (Issue 123).
+	- Code cleaning.
+	
+04/13/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.6 'Marshal West':
+	- Addresses logging fixed.
+	- Redis admin options fixed.
+	- Redis compilation cleaned.
+	- Performance and logging socket problem fixed (Issue 123).
+
+04/07/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.5 'Marshal West':
+	- Mobile allocation quota fixed (issue 121);
+	- --simple-log option added (Issue 122);
+	- documentation fixes (REST API, Redis).
+
+04/06/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.4 'Marshal West':
+	- Mobile TCP sessions fixed (issue 120);
+	- log information improvements.
+
+04/04/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.3 'Marshal West':
+	- Pkey and cert file descriptors to be closed 
+	on initialization (issue 118);
+	- Address bind indefinite cycle on start-up fixed
+	(Issue 119);
+	- Allocation counters time lag improved.
+	
+03/30/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.2 'Marshal West':
+	- Allocation counters fixed (issue 117);
+	- a possible core dump in the server code fixed;
+	- a possible memory leak in server fixed.
+	
+03/29/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.3.1 'Marshal West':
+	- TCP congestion avoidance completed.
+	- Read and write streams are treated separately in
+	bandwidth control.
+	- Test client fixed.
+	- Experimental SHA256 key storage supported.
+
+03/17/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.2.912 'Marshal West':
+	- TCP-in-TCP congestion avoidance implemented.
+	- UDP-in-TCP congestion avoidance improved.
+	- Alternate-server code cleaned.
+
+03/10/2014 Oleg Moskalenko <mom040267@gmail.com>
+Version 3.2.2.911 'Marshal West':
+	- "Congestion control" for UDP-inside-TCP tunneling;
+	- memory management improvements;
+	- socket logging improvements;
+	- debug info added to CentOS and Fedora RPMs;
+	- TCP traffic buffering improved;
+	- Thread barriers cleaned;
+	- TCP memory leak fixed;
+	- minor TCP test client improvement.
+
+03/09/2014 Oleg Moskalenko <mom040267@gmail.com>
 Version 3.2.2.910 'Marshal West':
 	- Log messages extended and cleaned.
 	- Some memory cleaning.
-	
+
 03/02/2014 Oleg Moskalenko <mom040267@gmail.com>
 Version 3.2.2.9 'Marshal West':
 	- Issue 113 fixed (TCP rate limit fixed);
@@ -286,9 +470,9 @@ Version 2.6.1.1 'Harding Grim':
 			= In REST API timestamp, we are now using
 				the expiration time (Issue 31).
 		* Configurable cipher suite in the TURN server.
-		* SSL3 support.
+		* SSLv3 support.
 		* TLS 1.1 and 1.2 support.
-		* SSL2 "encapsulation" mode support.
+		* SSLv2 "encapsulation" mode support.
 		* NULL OpenSSL cipher is allowed to be negotiated between
 			server and client.
 		* -U option (NULL cipher) added to the test client.
@@ -398,7 +582,7 @@ Version 1.8.5.4 'Black Dow':
 05/31/2013 Oleg Moskalenko <mom040267@gmail.com>
 Version 1.8.5.3 'Black Dow':
 
-	- REST API extra script example and docs extention.
+	- REST API extra script example and docs extension.
 
 05/26/2013 Oleg Moskalenko <mom040267@gmail.com>
 Version 1.8.5.1 'Black Dow':

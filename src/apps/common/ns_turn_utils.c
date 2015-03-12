@@ -41,6 +41,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#include <signal.h>
+
 ////////// LOG TIME OPTIMIZATION ///////////
 
 static volatile turn_time_t log_start_time = 0;
@@ -228,6 +230,7 @@ void addr_debug_print(int verbose, const ioa_addr *addr, const s08bits* s)
 
 static FILE* _rtpfile = NULL;
 static int to_syslog = 0;
+static int simple_log = 0;
 static char log_fn[FILE_STR_LEN]="\0";
 static char log_fn_base[FILE_STR_LEN]="\0";
 
@@ -279,14 +282,21 @@ void reset_rtpprintf(void)
 	log_unlock();
 }
 
-static void set_log_file_name(char *base, char *f)
+#define set_log_file_name(base, f) set_log_file_name_func(base, f, sizeof(f))
+
+static void set_log_file_name_func(char *base, char *f, size_t fsz)
 {
+	if(simple_log) {
+	  strncpy(f,base,fsz);
+	  return;
+	}
+
 	char logdate[125];
-	char *tail=strdup(".log");
+	char *tail=turn_strdup(".log");
 
 	get_date(logdate,sizeof(logdate));
 
-	char *base1=strdup(base);
+	char *base1=turn_strdup(base);
 
 	int len=(int)strlen(base1);
 
@@ -306,11 +316,11 @@ static void set_log_file_name(char *base, char *f)
 			break;
 		else if(base1[len]=='.') {
 			turn_free(tail,strlen(tail)+1);
-			tail=strdup(base1+len);
+			tail=turn_strdup(base1+len);
 			base1[len]=0;
 			if(strlen(tail)<2) {
 				turn_free(tail,strlen(tail)+1);
-				tail = strdup(".log");
+				tail = turn_strdup(".log");
 			}
 			break;
 		}
@@ -328,11 +338,20 @@ static void set_log_file_name(char *base, char *f)
 	turn_free(tail,strlen(tail)+1);
 }
 
+static void sighup_callback_handler(int signum)
+{
+	if(signum == SIGHUP) {
+		printf("%s: resetting the log file\n",__FUNCTION__);
+		reset_rtpprintf();
+	}
+}
+
 static void set_rtpfile(void)
 {
 	if(to_syslog) {
 		return;
 	} else if (!_rtpfile) {
+		signal(SIGHUP, sighup_callback_handler);
 		if(log_fn_base[0]) {
 			if(!strcmp(log_fn_base,"syslog")) {
 				_rtpfile = stdout;
@@ -343,6 +362,8 @@ static void set_rtpfile(void)
 			} else {
 				set_log_file_name(log_fn_base,log_fn);
 				_rtpfile = fopen(log_fn, "w");
+				if(_rtpfile)
+					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "log file opened: %s\n", log_fn);
 			}
 			if (!_rtpfile) {
 				fprintf(stderr,"ERROR: Cannot open log file for writing: %s\n",log_fn);
@@ -353,33 +374,49 @@ static void set_rtpfile(void)
 	}
 
 	if(!_rtpfile) {
+
 		char logbase[FILE_STR_LEN];
 		char logtail[FILE_STR_LEN];
 		char logf[FILE_STR_LEN];
 
-		snprintf(logtail, FILE_STR_LEN, "turn_%d_", (int)getpid());
+		if(simple_log)
+			snprintf(logtail, FILE_STR_LEN, "turn.log");
+		else
+			snprintf(logtail, FILE_STR_LEN, "turn_%d_", (int)getpid());
+
 		snprintf(logbase, FILE_STR_LEN, "/var/log/turnserver/%s", logtail);
 
 		set_log_file_name(logbase, logf);
+
 		_rtpfile = fopen(logf, "w");
-		if (!_rtpfile) {
+		if(_rtpfile)
+			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "log file opened: %s\n", logf);
+		else {
 			snprintf(logbase, FILE_STR_LEN, "/var/log/%s", logtail);
 
 			set_log_file_name(logbase, logf);
 			_rtpfile = fopen(logf, "w");
-			if (!_rtpfile) {
+			if(_rtpfile)
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "log file opened: %s\n", logf);
+			else {
 				snprintf(logbase, FILE_STR_LEN, "/var/tmp/%s", logtail);
 				set_log_file_name(logbase, logf);
 				_rtpfile = fopen(logf, "w");
-				if (!_rtpfile) {
+				if(_rtpfile)
+					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "log file opened: %s\n", logf);
+				else {
 					snprintf(logbase, FILE_STR_LEN, "/tmp/%s", logtail);
 					set_log_file_name(logbase, logf);
 					_rtpfile = fopen(logf, "w");
-					if (!_rtpfile) {
+					if(_rtpfile)
+						TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "log file opened: %s\n", logf);
+					else {
 						snprintf(logbase, FILE_STR_LEN, "%s", logtail);
 						set_log_file_name(logbase, logf);
 						_rtpfile = fopen(logf, "w");
-						if (!_rtpfile) {
+						if(_rtpfile)
+							TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "log file opened: %s\n", logf);
+						else {
 							_rtpfile = stdout;
 							return;
 						}
@@ -398,12 +435,32 @@ void set_log_to_syslog(int val)
 	to_syslog = val;
 }
 
+void set_simple_log(int val)
+{
+	simple_log = val;
+}
+
 #define Q(x) #x
 #define QUOTE(x) Q(x)
 
 void rollover_logfile(void)
 {
-	if(to_syslog)
+	if(to_syslog || !(log_fn[0]))
+		return;
+
+	{
+		FILE *f = fopen(log_fn,"r");
+		if(!f) {
+			fprintf(stderr, "log file is damaged\n");
+			reset_rtpprintf();
+			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "log file reopened: %s\n", log_fn);
+			return;
+		} else {
+			fclose(f);
+		}
+	}
+
+	if(simple_log)
 		return;
 
 	log_lock();
@@ -415,10 +472,11 @@ void rollover_logfile(void)
 			fclose(_rtpfile);
 			log_fn[0]=0;
 			_rtpfile = fopen(logf, "w");
-			if(!_rtpfile) {
-				_rtpfile = stdout;
-			} else {
+			if(_rtpfile) {
 				STRCPY(log_fn,logf);
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "log file opened: %s\n", log_fn);
+			} else {
+				_rtpfile = stdout;
 			}
 		}
 	}
@@ -459,8 +517,11 @@ int vrtpprintf(TURN_LOG_LEVEL level, const char *format, va_list args)
 	} else {
 		log_lock();
 		set_rtpfile();
-		fprintf(_rtpfile,"%s",s);
-		fflush(_rtpfile);
+		if(fprintf(_rtpfile,"%s",s)<0) {
+			reset_rtpprintf();
+		} else if(fflush(_rtpfile)<0) {
+			reset_rtpprintf();
+		}
 		log_unlock();
 	}
 
@@ -474,5 +535,193 @@ void rtpprintf(const char *format, ...)
 	vrtpprintf(TURN_LOG_LEVEL_INFO, format, args);
 	va_end (args);
 }
+
+//////////////////////////////////////////////////////////////////
+
+#ifdef __cplusplus
+#if defined(TURN_MEMORY_DEBUG)
+
+#include <map>
+#include <set>
+#include <string>
+
+static volatile int tmm_init = 0;
+static pthread_mutex_t tm;
+
+typedef void* ptrtype;
+typedef std::set<ptrtype> ptrs_t;
+typedef std::map<std::string,ptrs_t> str_to_ptrs_t;
+typedef std::map<ptrtype,std::string> ptr_to_str_t;
+
+static str_to_ptrs_t str_to_ptrs;
+static ptr_to_str_t ptr_to_str;
+
+static void tm_init(void) {
+  if(!tmm_init) {
+    pthread_mutex_init(&tm,NULL);
+    tmm_init = 1;
+  }
+}
+
+static void add_tm_ptr(void *ptr, const char *id) {
+
+  UNUSED_ARG(ptr);
+  UNUSED_ARG(id);
+
+  if(!ptr)
+    return;
+
+  std::string sid(id);
+
+  str_to_ptrs_t::iterator iter;
+
+  pthread_mutex_lock(&tm);
+
+  iter = str_to_ptrs.find(sid);
+
+  if(iter == str_to_ptrs.end()) {
+    std::set<ptrtype> sp;
+    sp.insert(ptr);
+    str_to_ptrs[sid]=sp;
+  } else {
+	iter->second.insert(ptr);
+  }
+
+  ptr_to_str[ptr]=sid;
+
+  pthread_mutex_unlock(&tm);
+}
+
+static void del_tm_ptr(void *ptr, const char *id) {
+
+  UNUSED_ARG(ptr);
+  UNUSED_ARG(id);
+
+  if(!ptr)
+    return;
+
+  pthread_mutex_lock(&tm);
+
+  ptr_to_str_t::iterator pts_iter = ptr_to_str.find(ptr);
+  if(pts_iter == ptr_to_str.end()) {
+
+	  printf("Tring to free unknown pointer (1): %s\n",id);
+
+  } else {
+
+    std::string sid = pts_iter->second;
+    ptr_to_str.erase(pts_iter);
+
+    str_to_ptrs_t::iterator iter = str_to_ptrs.find(sid);
+
+    if(iter == str_to_ptrs.end()) {
+
+    	printf("Tring to free unknown pointer (2): %s\n",id);
+
+    } else {
+
+      iter->second.erase(ptr);
+
+    }
+  }
+
+  pthread_mutex_unlock(&tm);
+}
+
+static void tm_id(char *id, const char* file, int line) {
+  sprintf(id,"%s:%d",file,line);
+}
+
+#define TM_START() char id[128];tm_id(id,file,line);tm_init()
+
+extern "C" void tm_print_func(void);
+void tm_print_func(void) {
+  pthread_mutex_lock(&tm);
+  printf("=============================================\n");
+  for(str_to_ptrs_t::const_iterator iter=str_to_ptrs.begin();iter != str_to_ptrs.end();++iter) {
+	  if(iter->second.size())
+		  printf("%s: %s: %d\n",__FUNCTION__,iter->first.c_str(),(int)(iter->second.size()));
+  }
+  printf("=============================================\n");
+  pthread_mutex_unlock(&tm);
+} 
+
+extern "C" void *turn_malloc_func(size_t sz, const char* file, int line);
+void *turn_malloc_func(size_t sz, const char* file, int line) {
+
+  TM_START();
+
+  void *ptr = malloc(sz);
+  
+  add_tm_ptr(ptr,id);
+
+  return ptr;
+}
+
+extern "C" void *turn_realloc_func(void *ptr, size_t old_sz, size_t new_sz, const char* file, int line);
+void *turn_realloc_func(void *ptr, size_t old_sz, size_t new_sz, const char* file, int line) {
+
+  UNUSED_ARG(old_sz);
+
+  TM_START();
+
+  if(ptr)
+	  del_tm_ptr(ptr,id);
+
+  ptr = realloc(ptr,new_sz);
+
+  add_tm_ptr(ptr,id);
+
+  return ptr;
+}
+
+extern "C" void turn_free_func(void *ptr, size_t sz, const char* file, int line);
+void turn_free_func(void *ptr, size_t sz, const char* file, int line) {
+
+  UNUSED_ARG(sz);
+
+  TM_START();
+
+  del_tm_ptr(ptr,id);
+
+  free(ptr);
+}
+
+extern "C" void turn_free_simple(void *ptr);
+void turn_free_simple(void *ptr) {
+
+  tm_init();
+
+  del_tm_ptr(ptr,__FUNCTION__);
+
+  free(ptr);
+}
+
+extern "C" void *turn_calloc_func(size_t number, size_t size, const char* file, int line);
+void *turn_calloc_func(size_t number, size_t size, const char* file, int line) {
+  
+  TM_START();
+
+  void *ptr = calloc(number,size);
+
+  add_tm_ptr(ptr,id);
+
+  return ptr;
+}
+
+extern "C" char *turn_strdup_func(const char* s, const char* file, int line);
+char *turn_strdup_func(const char* s, const char* file, int line) {
+
+  TM_START();
+
+  char *ptr = strdup(s);
+
+  add_tm_ptr(ptr,id);
+
+  return ptr;
+}
+
+#endif
+#endif
 
 //////////////////////////////////////////////////////////////////

@@ -65,7 +65,9 @@ extern "C" {
 #define MAX_BUFFER_QUEUE_SIZE_PER_ENGINE (64)
 #define MAX_SOCKET_BUFFER_BACKLOG (16)
 
-#define BUFFEREVENT_HIGH_WATERMARK 65535
+#define BUFFEREVENT_HIGH_WATERMARK (128<<10)
+#define BUFFEREVENT_MAX_UDP_TO_TCP_WRITE (64<<9)
+#define BUFFEREVENT_MAX_TCP_TO_TCP_WRITE (192<<10)
 
 typedef struct _stun_buffer_list_elem {
 	struct _stun_buffer_list_elem *next;
@@ -89,6 +91,12 @@ struct cb_socket_message {
 	stun_tid tid;
 	ioa_socket_handle s;
 	int message_integrity;
+	ioa_net_data nd;
+	int can_resume;
+};
+
+struct cancelled_session_message {
+	turnsession_id id;
 };
 
 struct relay_server {
@@ -110,6 +118,7 @@ struct message_to_relay {
 	union {
 		struct socket_message sm;
 		struct cb_socket_message cb_sm;
+		struct cancelled_session_message csm;
 	} m;
 };
 
@@ -158,6 +167,11 @@ struct _ioa_engine
 
 #define SOCKET_MAGIC (0xABACADEF)
 
+struct traffic_bytes {
+	band_limit_t jiffie_bytes_read;
+	band_limit_t jiffie_bytes_write;
+};
+
 struct _ioa_socket
 {
 	evutil_socket_t fd;
@@ -171,6 +185,8 @@ struct _ioa_socket
 	SOCKET_TYPE st;
 	SOCKET_APP_TYPE sat;
 	SSL* ssl;
+	u32bits ssl_renegs;
+	int in_write;
 	char orig_ctx_type[16];
 	int bound;
 	int local_addr_known;
@@ -182,7 +198,7 @@ struct _ioa_socket
 	ioa_net_event_handler read_cb;
 	void *read_ctx;
 	int done;
-	void* session;
+	ts_ur_super_session* session;
 	int current_df_relay_flag;
 	/* RFC6156: if IPv6 is involved, do not use DF: */
 	int do_not_use_df;
@@ -193,11 +209,12 @@ struct _ioa_socket
 	int default_tos;
 	int current_tos;
 	stun_buffer_list bufs;
-	turn_time_t jiffie;
-	band_limit_t jiffie_bytes;
+	turn_time_t jiffie; /* bandwidth check interval */
+	struct traffic_bytes data_traffic;
+	struct traffic_bytes control_traffic;
 	/* RFC 6062 ==>> */
 	//Connection session:
-	void *sub_session;
+	tcp_connection *sub_session;
 	//Connect:
 	struct bufferevent *conn_bev;
 	connect_cb conn_cb;
@@ -261,6 +278,10 @@ int set_raw_socket_tos_options(evutil_socket_t fd, int family);
 
 int set_socket_options_fd(evutil_socket_t fd, int tcp, int family);
 int set_socket_options(ioa_socket_handle s);
+
+int send_session_cancellation_to_relay(turnsession_id sid);
+
+int ioa_socket_check_bandwidth(ioa_socket_handle s, ioa_network_buffer_handle nbh, int read);
 
 ///////////////////////// SUPER MEMORY ////////
 

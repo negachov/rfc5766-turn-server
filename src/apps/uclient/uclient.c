@@ -39,6 +39,8 @@
 
 #include <openssl/err.h>
 
+#include <sys/select.h>
+
 static int verbose_packets=0;
 
 static size_t current_clients_number = 0;
@@ -46,7 +48,10 @@ static size_t current_clients_number = 0;
 static int start_full_timer=0;
 static u32bits tot_messages=0;
 static u32bits tot_send_messages=0;
+static u64bits tot_send_bytes = 0;
 static u32bits tot_recv_messages=0;
+static u64bits tot_recv_bytes = 0;
+static u64bits tot_send_dropped = 0;
 
 struct event_base* client_event_base=NULL;
 
@@ -64,6 +69,8 @@ static int total_clients = 0;
 static app_ur_session** elems = NULL;
 
 #define SLEEP_INTERVAL (234)
+
+#define MAX_LISTENING_CYCLE_NUMBER (7)
 
 int RTP_PACKET_INTERVAL = 20;
 
@@ -103,7 +110,7 @@ static void __turn_getMSTime(void) {
 
 ////////////////////////////////////////////////////////////////////
 
-static int refresh_channel(app_ur_session* elem, u16bits method);
+static int refresh_channel(app_ur_session* elem, u16bits method, uint32_t lt);
 
 //////////////////////// SS ////////////////////////////////////////
 
@@ -149,8 +156,10 @@ static void uc_delete_session_elem_data(app_ur_session* cdi) {
 	}
       }
       cdi->pinfo.tcp_conn_number=0;
-      turn_free(cdi->pinfo.tcp_conn, 111);
-      cdi->pinfo.tcp_conn=NULL;
+      if(cdi->pinfo.tcp_conn) {
+    	  turn_free(cdi->pinfo.tcp_conn, 111);
+    	  cdi->pinfo.tcp_conn=NULL;
+      }
     }
     if(cdi->pinfo.ssl && !(cdi->pinfo.broken)) {
 	    if(!(SSL_get_shutdown(cdi->pinfo.ssl) & SSL_SENT_SHUTDOWN)) {
@@ -227,7 +236,7 @@ int send_buffer(app_ur_conn_info *clnet_info, stun_buffer* message, int data_con
 			int len = 0;
 			do {
 				len = SSL_write(ssl, buffer, (int)message->len);
-			} while (len < 0 && ((errno == EINTR) || (errno == ENOBUFS) || (errno == EAGAIN)));
+			} while (len < 0 && ((errno == EINTR) || (errno == ENOBUFS)));
 
 			if(len == (int)message->len) {
 				if (clnet_verbose) {
@@ -279,12 +288,12 @@ int send_buffer(app_ur_conn_info *clnet_info, stun_buffer* message, int data_con
 		while (left > 0) {
 			do {
 				rc = send(fd, buffer, left, 0);
-			} while (rc < 0 && ((errno == EINTR) || (errno == ENOBUFS) || (errno
-							== EAGAIN)));
+			} while (rc < 0 && ((errno == EINTR) || (errno == ENOBUFS)));
 			if (rc > 0) {
 				left -= (size_t) rc;
 				buffer += rc;
 			} else {
+				tot_send_dropped+=1;
 				break;
 			}
 		}
@@ -298,10 +307,67 @@ int send_buffer(app_ur_conn_info *clnet_info, stun_buffer* message, int data_con
 	return ret;
 }
 
-int recv_buffer(app_ur_conn_info *clnet_info, stun_buffer* message, int sync,
-		app_tcp_conn_info *atc) {
+static int wait_fd(int fd, unsigned int cycle) {
+
+	if(fd>=(int)FD_SETSIZE) {
+		return 1;
+	} else {
+		fd_set fds;
+		FD_ZERO(&fds);
+		FD_SET(fd,&fds);
+
+		if(dos && cycle==0)
+			return 0;
+
+		struct timeval start_time;
+		struct timeval ctime;
+		gettimeofday(&start_time,NULL);
+
+		ctime.tv_sec = start_time.tv_sec;
+		ctime.tv_usec = start_time.tv_usec;
+
+		int rc = 0;
+
+		do {
+			struct timeval timeout = {0,0};
+			if(cycle == 0) {
+				timeout.tv_usec = 500000;
+			} else {
+
+				timeout.tv_sec = 1;
+				while(--cycle) timeout.tv_sec = timeout.tv_sec + timeout.tv_sec;
+
+				if(ctime.tv_sec > start_time.tv_sec) {
+					if(ctime.tv_sec >= start_time.tv_sec + timeout.tv_sec) {
+						break;
+					} else {
+						timeout.tv_sec -= (ctime.tv_sec - start_time.tv_sec);
+					}
+				}
+			}
+			rc = select(fd+1,&fds,NULL,NULL,&timeout);
+			if((rc<0) && (errno == EINTR)) {
+				gettimeofday(&ctime,NULL);
+			} else {
+				break;
+			}
+		} while(1);
+
+		return rc;
+	}
+}
+
+int recv_buffer(app_ur_conn_info *clnet_info, stun_buffer* message, int sync, int data_connection, app_tcp_conn_info *atc, stun_buffer* request_message) {
 
 	int rc = 0;
+
+	stun_tid tid;
+	u16bits method = 0;
+
+	if(request_message) {
+		stun_tid_from_message(request_message, &tid);
+		method = stun_get_method(request_message);
+	}
 
 	ioa_socket_raw fd = clnet_info->fd;
 	if (atc)
@@ -310,6 +376,24 @@ int recv_buffer(app_ur_conn_info *clnet_info, stun_buffer* message, int sync,
 	SSL* ssl = clnet_info->ssl;
 	if (atc)
 		ssl = atc->tcp_data_ssl;
+
+	recv_again:
+
+	if(!use_tcp && sync && request_message && (fd>=0)) {
+
+		unsigned int cycle = 0;
+		while(cycle < MAX_LISTENING_CYCLE_NUMBER) {
+			int serc = wait_fd(fd,cycle);
+			if(serc>0)
+				break;
+			if(serc<0) {
+				return -1;
+			}
+			if(send_buffer(clnet_info, request_message, data_connection, atc)<=0)
+				return -1;
+			++cycle;
+		}
+	}
 
 	if (!use_secure && !use_tcp && fd >= 0) {
 
@@ -327,9 +411,9 @@ int recv_buffer(app_ur_conn_info *clnet_info, stun_buffer* message, int sync,
 
 		message->len = rc;
 
-	} else if (use_secure && ssl && !(clnet_info->broken)) {
+	} else if (use_secure && !use_tcp && ssl && !(clnet_info->broken)) {
 
-		/* TLS/DTLS */
+		/* DTLS */
 
 		int message_received = 0;
 		int cycle = 0;
@@ -357,6 +441,74 @@ int recv_buffer(app_ur_conn_info *clnet_info, stun_buffer* message, int sync,
 			} else {
 
 				int sslerr = SSL_get_error(ssl, rc);
+
+				switch (sslerr) {
+				case SSL_ERROR_NONE:
+					/* Try again ? */
+					break;
+				case SSL_ERROR_WANT_WRITE:
+					/* Just try again later */
+					break;
+				case SSL_ERROR_WANT_READ:
+					/* continue with reading */
+					break;
+				case SSL_ERROR_ZERO_RETURN:
+					/* Try again */
+					break;
+				case SSL_ERROR_SYSCALL:
+					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,
+							"Socket read error 111.999: \n");
+					if (handle_socket_error())
+						break;
+				case SSL_ERROR_SSL: {
+					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "SSL write error: \n");
+					char buf[1024];
+					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "%s (%d)\n",
+							ERR_error_string(ERR_get_error(), buf),
+							SSL_get_error(ssl, rc));
+				}
+				default:
+					clnet_info->broken = 1;
+					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,
+							"Unexpected error while reading: rc=%d, sslerr=%d\n",
+							rc, sslerr);
+					return -1;
+				}
+
+				if (!sync)
+					break;
+			}
+		}
+
+	} else if (use_secure && use_tcp && ssl && !(clnet_info->broken)) {
+
+		/* TLS*/
+
+		int message_received = 0;
+		int cycle = 0;
+		while (!message_received && cycle++ < 100) {
+
+			if (SSL_get_shutdown(ssl))
+				return -1;
+				rc = 0;
+			do {
+				rc = SSL_read(ssl, message->buf, sizeof(message->buf) - 1);
+				if (rc < 0 && errno == EAGAIN && sync)
+					continue;
+			} while (rc < 0 && (errno == EINTR));
+
+			if (rc > 0) {
+
+				if (clnet_verbose) {
+					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,
+							"response received: size=%d\n", rc);
+				}
+				message->len = rc;
+				message_received = 1;
+
+			} else {
+
+			int sslerr = SSL_get_error(ssl, rc);
 
 				switch (sslerr) {
 				case SSL_ERROR_NONE:
@@ -461,6 +613,27 @@ int recv_buffer(app_ur_conn_info *clnet_info, stun_buffer* message, int sync,
 		}
 	}
 
+	if(rc>0) {
+		if(request_message) {
+
+			stun_tid recv_tid;
+			u16bits recv_method = 0;
+
+			stun_tid_from_message(message, &recv_tid);
+			recv_method = stun_get_method(message);
+
+			if(method != recv_method) {
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "Received wrong response method: 0x%x, expected 0x%x; trying again...\n",(unsigned int)recv_method,(unsigned int)method);
+				goto recv_again;
+			}
+
+			if(memcmp(tid.tsx_id,recv_tid.tsx_id,STUN_TID_SIZE)) {
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "Received wrong response tid; trying again...\n");
+				goto recv_again;
+			}
+		}
+	}
+
 	return rc;
 }
 
@@ -478,12 +651,13 @@ static int client_read(app_ur_session *elem, int is_tcp_data, app_tcp_conn_info 
 	int err_code = 0;
 	u08bits err_msg[129];
 	int rc = 0;
+	int applen = 0;
 
 	if (clnet_verbose && verbose_packets) {
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "before read ...\n");
 	}
 
-	rc = recv_buffer(clnet_info, &(elem->in_buffer), 0, atc);
+	rc = recv_buffer(clnet_info, &(elem->in_buffer), 0, is_tcp_data, atc, NULL);
 
 	if (clnet_verbose && verbose_packets) {
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "read %d bytes\n", (int) rc);
@@ -499,33 +673,17 @@ static int client_read(app_ur_session *elem, int is_tcp_data, app_tcp_conn_info 
 
 		size_t buffers = 1;
 
-		 if(is_tcp_data) {
-			{
-				if ((int)elem->in_buffer.len > clmessage_length) {
-					if(clnet_verbose) {
-						TURN_LOG_FUNC(
-						TURN_LOG_LEVEL_INFO,
-						"WARNING: received multiple buffers: length: %d, length of single buffer must be %d\n",
-						rc, clmessage_length);
-					}
-					buffers=elem->in_buffer.len/clmessage_length;
-				} else if ((int)elem->in_buffer.len < clmessage_length) {
-					TURN_LOG_FUNC(
-						TURN_LOG_LEVEL_INFO,
-						"ERROR: received wrong buffer size: length: %d, must be %d; len=%d\n",
-						rc, clmessage_length, (int)elem->in_buffer.len);
-					return rc;
-				}
-
-				mi = (message_info*)(elem->in_buffer.buf);
-			}
+		if(is_tcp_data) {
+		   if ((int)elem->in_buffer.len == clmessage_length) {
+		     mi = (message_info*)(elem->in_buffer.buf);
+		   }
 		} else if (stun_is_indication(&(elem->in_buffer))) {
 
 			if(use_short_term) {
 				SHATYPE sht = elem->pinfo.shatype;
 				if(stun_check_message_integrity_str(get_turn_credentials_type(),
 							elem->in_buffer.buf, (size_t)(elem->in_buffer.len), g_uname,
-							elem->pinfo.realm, g_upwd, &sht)<1) {
+							elem->pinfo.realm, g_upwd, sht)<1) {
 					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"Wrong integrity in indication message 0x%x received from server\n",(unsigned int)stun_get_method(&(elem->in_buffer)));
 					return -1;
 				}
@@ -566,8 +724,10 @@ static int client_read(app_ur_session *elem, int is_tcp_data, app_tcp_conn_info 
 				}
 
 				int rlen = stun_attr_get_len(sar);
+				applen = rlen;
 				if (rlen != clmessage_length) {
 					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "ERROR: received DATA message has wrong len: %d, must be %d\n", rlen, clmessage_length);
+					tot_recv_bytes += applen;
 					return rc;
 				}
 
@@ -582,7 +742,7 @@ static int client_read(app_ur_session *elem, int is_tcp_data, app_tcp_conn_info 
 				SHATYPE sht = elem->pinfo.shatype;
 				if(stun_check_message_integrity_str(get_turn_credentials_type(),
 								elem->in_buffer.buf, (size_t)(elem->in_buffer.len), g_uname,
-								elem->pinfo.realm, g_upwd, &sht)<0) {
+								elem->pinfo.realm, g_upwd, sht)<1) {
 					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"Wrong integrity in success message 0x%x received from server\n",(unsigned int)stun_get_method(&(elem->in_buffer)));
 					return -1;
 				}
@@ -608,11 +768,13 @@ static int client_read(app_ur_session *elem, int is_tcp_data, app_tcp_conn_info 
 							clnet_info->realm,clnet_info->nonce)) {
 			if(err_code == SHA_TOO_WEAK && (elem->pinfo.shatype == SHATYPE_SHA1)) {
 				elem->pinfo.shatype = SHATYPE_SHA256;
+				recalculate_restapi_hmac();
 			}
+
 			if(is_TCP_relay() && (stun_get_method(&(elem->in_buffer)) == STUN_METHOD_CONNECT)) {
 				turn_tcp_connect(clnet_verbose, &(elem->pinfo), &(elem->pinfo.peer_addr));
 			} else if(stun_get_method(&(elem->in_buffer)) == STUN_METHOD_REFRESH) {
-				refresh_channel(elem, stun_get_method(&elem->in_buffer));
+				refresh_channel(elem, stun_get_method(&elem->in_buffer),600);
 			}
 			return rc;
 		} else if (stun_is_error_response(&(elem->in_buffer), NULL,NULL,0)) {
@@ -636,6 +798,7 @@ static int client_read(app_ur_session *elem, int is_tcp_data, app_tcp_conn_info 
 				}
 
 				mi = (message_info*)(elem->in_buffer.buf + 4);
+				applen = elem->in_buffer.len -4;
 			}
 		} else {
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,
@@ -674,6 +837,10 @@ static int client_read(app_ur_session *elem, int is_tcp_data, app_tcp_conn_info 
 
 		elem->rmsgnum+=buffers;
 		tot_recv_messages+=buffers;
+		if(applen > 0)
+			tot_recv_bytes += applen;
+		else
+			tot_recv_bytes += elem->in_buffer.len;
 		elem->recvtimems=current_mstime;
 		elem->wait_cycles = 0;
 
@@ -725,6 +892,7 @@ static int client_write(app_ur_session *elem) {
 			  ++elem->wmsgnum;
 			  elem->to_send_timems += RTP_PACKET_INTERVAL;
 			  tot_send_messages++;
+			  tot_send_bytes += clmessage_length;
 		  }
 		  return 0;
 	  }
@@ -773,6 +941,7 @@ static int client_write(app_ur_session *elem) {
 				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "wrote %d bytes\n", (int) rc);
 	  }
       tot_send_messages++;
+      tot_send_bytes += clmessage_length;
     } else {
     	return -1;
     }
@@ -920,7 +1089,7 @@ static int start_client(const char *remote_address, int port,
   
   elems[i]=ss;
 
-  refresh_channel(ss,0);
+  refresh_channel(ss, 0, 600);
 
   if(!no_rtcp)
     elems[i+1]=ss_rtcp;
@@ -1071,7 +1240,7 @@ static int start_c2c(const char *remote_address, int port,
   return 0;
 }
 
-static int refresh_channel(app_ur_session* elem, u16bits method)
+static int refresh_channel(app_ur_session* elem, u16bits method, uint32_t lt)
 {
 
 	stun_buffer message;
@@ -1082,7 +1251,7 @@ static int refresh_channel(app_ur_session* elem, u16bits method)
 
 	if (!method || (method == STUN_METHOD_REFRESH)) {
 		stun_init_request(STUN_METHOD_REFRESH, &message);
-		uint32_t lt = htonl(600);
+		lt = htonl(lt);
 		stun_attr_add(&message, STUN_ATTRIBUTE_LIFETIME, (const char*) &lt, 4);
 		if(add_integrity(clnet_info, &message)<0) return -1;
 		if(use_fingerprints)
@@ -1090,7 +1259,7 @@ static int refresh_channel(app_ur_session* elem, u16bits method)
 		send_buffer(clnet_info, &message, 0,0);
 	}
 
-	if (!addr_any(&(elem->pinfo.peer_addr))) {
+	if (lt && !addr_any(&(elem->pinfo.peer_addr))) {
 
 		if(!no_permissions) {
 			if (!method || (method == STUN_METHOD_CREATE_PERMISSION)) {
@@ -1119,17 +1288,22 @@ static int refresh_channel(app_ur_session* elem, u16bits method)
 	return 0;
 }
 
-static inline int client_timer_handler(app_ur_session* elem)
+static inline int client_timer_handler(app_ur_session* elem, int *done)
 {
 	if (elem) {
 		if (!turn_time_before(current_mstime, elem->refresh_time)) {
-			refresh_channel(elem, 0);
+			refresh_channel(elem, 0, 600);
 		}
 
 		if(hang_on && elem->completed)
 			return 0;
 
-		if (!turn_time_before(current_mstime, elem->to_send_timems)) {
+		int max_num = 50;
+		int cur_num = 0;
+
+		while (!turn_time_before(current_mstime, elem->to_send_timems)) {
+		  if(cur_num++>=max_num)
+		    break;
 			if (elem->wmsgnum >= elem->tot_msgnum) {
 				if (!turn_time_before(current_mstime, elem->finished_time) ||
 				 (tot_recv_messages>=tot_messages)) {
@@ -1150,6 +1324,7 @@ static inline int client_timer_handler(app_ur_session* elem)
 					elem->jitter=0;
 					elem->completed = 1;
 					if (!hang_on) {
+						refresh_channel(elem,0,0);
 						client_shutdown(elem);
 						return 1;
 					} else {
@@ -1157,6 +1332,7 @@ static inline int client_timer_handler(app_ur_session* elem)
 					}
 				}
 			} else {
+				*done += 1;
 				client_write(elem);
 				elem->finished_time = current_mstime + STOPPING_TIME*1000;
 			}
@@ -1176,11 +1352,20 @@ static void timer_handler(evutil_socket_t fd, short event, void *arg)
 
 	if(start_full_timer) {
 		int i = 0;
+		int done = 0;
 		for (i = 0; i < total_clients; ++i) {
 			if (elems[i]) {
-				int finished = client_timer_handler(elems[i]);
+				int finished = client_timer_handler(elems[i], &done);
 				if (finished) {
 					elems[i] = NULL;
+				}
+			}
+		}
+		if(done>5 && (dos || random_disconnect)) {
+			for (i = 0; i < total_clients; ++i) {
+				if (elems[i]) {
+					close(elems[i]->pinfo.fd);
+					elems[i]->pinfo.fd = -1;
 				}
 			}
 		}
@@ -1208,7 +1393,7 @@ void start_mclient(const char *remote_address, int port,
 	      ++mclient;
 	}
 
-	elems = (app_ur_session**)malloc(sizeof(app_ur_session)*((mclient*2)+1)+sizeof(void*));
+	elems = (app_ur_session**)turn_malloc(sizeof(app_ur_session)*((mclient*2)+1)+sizeof(void*));
 
 	__turn_getMSTime();
 	u32bits stime = current_time;
@@ -1283,9 +1468,12 @@ void start_mclient(const char *remote_address, int port,
 					int connect_err = 0;
 					socket_connect(elems[i]->pinfo.fd, &(elems[i]->pinfo.remote_addr), &connect_err);
 				}
-			} else if((i%2) == 0) {
-				if (turn_tcp_connect(clnet_verbose, &(elems[i]->pinfo), &(elems[i]->pinfo.peer_addr)) < 0) {
-					exit(-1);
+			} else {
+				int j = 0;
+				for(j=i+1;j<total_clients;j++) {
+					if (turn_tcp_connect(clnet_verbose, &(elems[i]->pinfo), &(elems[j]->pinfo.relay_addr)) < 0) {
+						exit(-1);
+					}
 				}
 			}
 		}
@@ -1317,18 +1505,22 @@ void start_mclient(const char *remote_address, int port,
 					break;
 			} else {
 				for(i=0;i<total_clients;++i) {
-					if(elems[i]->pinfo.tcp_conn_number>0 &&
-							elems[i]->pinfo.tcp_conn[0]->tcp_data_bound) {
-						completed += elems[i]->pinfo.tcp_conn_number;
+					int j = 0;
+					for(j=0;j<(int)elems[i]->pinfo.tcp_conn_number;j++) {
+						if(elems[i]->pinfo.tcp_conn[j]->tcp_data_bound) {
+							completed++;
+						}
 					}
 				}
-				if(completed >= total_clients)
+				if(completed >= total_clients*(total_clients-1)) {
+					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "%d connections are completed\n",(int)(completed));
 					break;
+				}
 			}
 			run_events(0);
-			if(current_time > connect_wait_start_time + STARTING_TCP_RELAY_TIME) {
-				TURN_LOG_FUNC(TURN_LOG_LEVEL_WARNING, "WARNING: %d connections are not completed\n",
-						(int)(total_clients - completed));
+			if(current_time > connect_wait_start_time + STARTING_TCP_RELAY_TIME + total_clients) {
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_WARNING, "WARNING: %d connections are completed, not enough\n",
+						(int)(completed));
 				break;
 			}
 		}
@@ -1347,7 +1539,7 @@ void start_mclient(const char *remote_address, int port,
 
 	while (1) {
 
-		run_events(0);
+		run_events(1);
 
 		int msz = (int)current_clients_number;
 		if (msz < 1) {
@@ -1356,9 +1548,11 @@ void start_mclient(const char *remote_address, int port,
 
 		if(show_statistics) {
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,
-				      "%s: msz=%d, tot_send_msgs=%lu, tot_recv_msgs=%lu\n",
+				      "%s: msz=%d, tot_send_msgs=%lu, tot_recv_msgs=%lu, tot_send_bytes ~ %llu, tot_recv_bytes ~ %llu\n",
 				      __FUNCTION__, msz, (unsigned long) tot_send_messages,
-				      (unsigned long) tot_recv_messages);
+				      (unsigned long) tot_recv_messages, 
+				      (unsigned long long) tot_send_bytes,
+				      (unsigned long long) tot_recv_bytes);
 			show_statistics=0;
 		}
 	}
@@ -1368,6 +1562,12 @@ void start_mclient(const char *remote_address, int port,
 		      __FUNCTION__,
 		      (unsigned long) tot_send_messages,
 		      (unsigned long) tot_recv_messages);
+
+	TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,
+		      "%s: tot_send_bytes ~ %lu, tot_recv_bytes ~ %lu\n",
+		      __FUNCTION__,
+		      (unsigned long) tot_send_bytes,
+		      (unsigned long) tot_recv_bytes);
 
 	if (client_event_base)
 		event_base_free(client_event_base);
@@ -1379,8 +1579,9 @@ void start_mclient(const char *remote_address, int port,
 
 	TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "Total transmit time is %u\n",
 			((unsigned int)(current_time - stime)));
-	TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "Total lost packets %llu (%f%c)\n",
-				(unsigned long long)total_loss, (((double)total_loss/(double)tot_send_messages)*100.00),'%');
+	TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "Total lost packets %llu (%f%c), total send dropped %llu (%f%c)\n",
+				(unsigned long long)total_loss, (((double)total_loss/(double)tot_send_messages)*100.00),'%',
+				(unsigned long long)tot_send_dropped, (((double)tot_send_dropped/(double)(tot_send_messages+tot_send_dropped))*100.00),'%');
 	TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "Average round trip delay %f ms; min = %lu ms, max = %lu ms\n",
 				((double)total_latency/(double)((tot_recv_messages<1) ? 1 : tot_recv_messages)),
 				(unsigned long)min_latency,
@@ -1390,7 +1591,7 @@ void start_mclient(const char *remote_address, int port,
 				(unsigned long)min_jitter,
 				(unsigned long)max_jitter);
 
-	free(elems);
+	turn_free(elems,0);
 }
 
 ///////////////////////////////////////////

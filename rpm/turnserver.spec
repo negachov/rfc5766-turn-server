@@ -1,5 +1,5 @@
 Name:		turnserver
-Version:	3.2.2.910
+Version:	3.2.5.6
 Release:	0%{dist}
 Summary:	RFC5766 TURN Server
 
@@ -44,8 +44,7 @@ STUN specs:
 The implementation fully supports the following client-to-TURN-server protocols:
 - UDP (per RFC 5766)
 - TCP (per RFC 5766 and RFC 6062)
-- TLS (per RFC 5766 and RFC 6062); SSL3/TLS1.0/TLS1.1/TLS1.2; SSL2 wrapping
-  supported
+- TLS (per RFC 5766 and RFC 6062); SSL3/TLS1.0/TLS1.1/TLS1.2
 - DTLS (experimental non-standard feature)
 
 Supported relay protocols:
@@ -231,6 +230,7 @@ fi
 %{_datadir}/%{name}/scripts/longtermsecure/secure_udp_client.sh
 %dir %{_datadir}/%{name}/scripts/longtermsecuredb
 %{_datadir}/%{name}/scripts/longtermsecuredb/secure_relay_with_db_mysql.sh
+%{_datadir}/%{name}/scripts/longtermsecuredb/secure_relay_with_db_mysql_ssl.sh
 %{_datadir}/%{name}/scripts/longtermsecuredb/secure_relay_with_db_psql.sh
 %{_datadir}/%{name}/scripts/longtermsecuredb/secure_relay_with_db_redis.sh
 %dir %{_datadir}/%{name}/scripts/restapi
@@ -287,6 +287,62 @@ fi
 %{_includedir}/turn/client/TurnMsgLib.h
 
 %changelog
+* Sat Feb 28 2015 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.5.6
+* Tue Feb 3 2015 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.5.5
+* Mon Jan 26 2015 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.5.4
+* Sun Dec 14 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.5.3
+* Mon Nov 10 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.5.2
+* Thu Nov 07 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.5.1
+* Sun Oct 31 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.4.6
+* Thu Oct 16 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.4.5
+* Fri Sep 05 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.4.4
+* Mon Sep 01 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.4.3
+* Thu Aug 14 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.4.2
+* Tue Jul 29 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.4.1
+* Fri Jul 18 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.96
+* Fri Jul 11 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.95
+* Wed Jun 25 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.94
+* Tue Jun 03 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.92
+* Mon Jun 02 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.91
+* Fri May 30 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.9
+* Fri May 02 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.8
+* Sun Apr 23 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.7
+* Sun Apr 13 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.6
+* Mon Apr 07 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.5
+* Sun Apr 06 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.4
+* Fri Apr 04 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.3
+* Sun Mar 30 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.2
+* Sat Mar 29 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.3.1
+* Mon Mar 17 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.2.912
+* Mon Mar 10 2014 Oleg Moskalenko <mom040267@gmail.com>
+  - Sync to 3.2.2.911
 * Sun Mar 09 2014 Oleg Moskalenko <mom040267@gmail.com>
   - Sync to 3.2.2.910
 * Sun Mar 02 2014 Oleg Moskalenko <mom040267@gmail.com>

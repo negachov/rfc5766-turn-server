@@ -346,18 +346,20 @@ static int handle_udp_packet(dtls_listener_relay_server_type *server,
 			}
 		}
 
-		if (s && s->read_cb && sm->m.sm.nd.nbh) {
-			s->e = ioa_eng;
-			s->read_cb(s, IOA_EV_READ, &(sm->m.sm.nd), s->read_ctx);
-			ioa_network_buffer_delete(ioa_eng, sm->m.sm.nd.nbh);
-			sm->m.sm.nd.nbh = NULL;
+		if(ioa_socket_check_bandwidth(s,sm->m.sm.nd.nbh,1)) {
+			if (s && s->read_cb && sm->m.sm.nd.nbh) {
+				s->e = ioa_eng;
+				s->read_cb(s, IOA_EV_READ, &(sm->m.sm.nd), s->read_ctx, 1);
+				ioa_network_buffer_delete(ioa_eng, sm->m.sm.nd.nbh);
+				sm->m.sm.nd.nbh = NULL;
 
-			if (ioa_socket_tobeclosed(s)) {
-				ts_ur_super_session *ss = (ts_ur_super_session *) s->session;
-				if (ss) {
-					turn_turnserver *server = (turn_turnserver *) ss->server;
-					if (server) {
-						shutdown_client_connection(server, ss, 0, "UDP packet processing error");
+				if (ioa_socket_tobeclosed(s)) {
+					ts_ur_super_session *ss = (ts_ur_super_session *) s->session;
+					if (ss) {
+						turn_turnserver *server = (turn_turnserver *) ss->server;
+						if (server) {
+							shutdown_client_connection(server, ss, 0, "UDP packet processing error");
+						}
 					}
 				}
 			}
@@ -569,6 +571,9 @@ static int create_new_connected_udp_socket(
 
 		ioa_network_buffer_delete(server->e, server->sm.m.sm.nd.nbh);
 		server->sm.m.sm.nd.nbh = NULL;
+
+		ret->st = DTLS_SOCKET;
+		STRCPY(ret->orig_ctx_type,"DTLSv1.0");
 	}
 #endif
 
@@ -601,17 +606,18 @@ static void udp_server_input_handler(evutil_socket_t fd, short what, void* arg)
 	server->sm.m.sm.nd.nbh = elem;
 	server->sm.m.sm.nd.recv_ttl = TTL_IGNORE;
 	server->sm.m.sm.nd.recv_tos = TOS_IGNORE;
+	server->sm.m.sm.can_resume = 1;
 
 	addr_set_any(&(server->sm.m.sm.nd.src_addr));
 
-	int slen = server->slen0;
 	ssize_t bsize = 0;
 
-	int flags = 0;
+	int flags = MSG_DONTWAIT;
 
-	do {
-		bsize = recvfrom(fd, ioa_network_buffer_data(elem), ioa_network_buffer_get_capacity_udp(), flags, (struct sockaddr*) &(server->sm.m.sm.nd.src_addr), (socklen_t*) &slen);
-	} while (bsize < 0 && (errno == EINTR));
+	bsize = udp_recvfrom(fd, &(server->sm.m.sm.nd.src_addr), &(server->addr),
+			(s08bits*)ioa_network_buffer_data(elem), (int)ioa_network_buffer_get_capacity_udp(),
+			&(server->sm.m.sm.nd.recv_ttl), &(server->sm.m.sm.nd.recv_tos),
+			server->e->cmsg, flags, NULL);
 
 	int conn_reset = is_connreset();
 	int to_block = would_block();
@@ -634,6 +640,7 @@ static void udp_server_input_handler(evutil_socket_t fd, short what, void* arg)
 		ioa_addr orig_addr;
 		int ttl = 0;
 		int tos = 0;
+		int slen = server->slen0;
 		udp_recvfrom(fd, &orig_addr, &(server->addr), buffer,
 					(int) sizeof(buffer), &ttl, &tos, server->e->cmsg, eflags,
 					&errcode);
@@ -730,6 +737,9 @@ static int create_server_socket(dtls_listener_relay_server_type* server, int rep
 		  TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"Cannot bind listener socket to device %s\n",server->ifname);
 	  }
 
+	  set_raw_socket_ttl_options(udp_listen_fd, server->addr.ss.sa_family);
+	  set_raw_socket_tos_options(udp_listen_fd, server->addr.ss.sa_family);
+
 	  {
 		  const int max_binding_time = 60;
 		  int addr_bind_cycle = 0;
@@ -740,7 +750,7 @@ static int create_server_socket(dtls_listener_relay_server_type* server, int rep
 			  char saddr[129];
 			  addr_to_string(&server->addr,(u08bits*)saddr);
 			  TURN_LOG_FUNC(TURN_LOG_LEVEL_WARNING,"Cannot bind UDP/DTLS listener socket to addr %s\n",saddr);
-			  if(addr_bind_cycle<max_binding_time) {
+			  if(addr_bind_cycle++<max_binding_time) {
 				  TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO,"Trying to bind UDP/DTLS listener socket to addr %s, again...\n",saddr);
 				  sleep(1);
 				  goto retry_addr_bind;

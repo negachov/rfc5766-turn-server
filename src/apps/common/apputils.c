@@ -459,6 +459,131 @@ int get_socket_mtu(evutil_socket_t fd, int family, int verbose)
 	return ret;
 }
 
+int get_raw_socket_ttl(evutil_socket_t fd, int family)
+{
+	int ttl = 0;
+
+	if(family == AF_INET6) {
+#if !defined(IPV6_UNICAST_HOPS)
+		UNUSED_ARG(fd);
+		do { return TTL_IGNORE; } while(0);
+#else
+		socklen_t slen = (socklen_t)sizeof(ttl);
+		if(getsockopt(fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &ttl,&slen)<0) {
+			perror("get HOPLIMIT on socket");
+			return TTL_IGNORE;
+		}
+#endif
+	} else {
+#if !defined(IP_TTL)
+		UNUSED_ARG(fd);
+		do { return TTL_IGNORE; } while(0);
+#else
+		socklen_t slen = (socklen_t)sizeof(ttl);
+		if(getsockopt(fd, IPPROTO_IP, IP_TTL, &ttl,&slen)<0) {
+			perror("get TTL on socket");
+			return TTL_IGNORE;
+		}
+#endif
+	}
+
+	CORRECT_RAW_TTL(ttl);
+
+	return ttl;
+}
+
+int get_raw_socket_tos(evutil_socket_t fd, int family)
+{
+	int tos = 0;
+
+	if(family == AF_INET6) {
+#if !defined(IPV6_TCLASS)
+		UNUSED_ARG(fd);
+		do { return TOS_IGNORE; } while(0);
+#else
+		socklen_t slen = (socklen_t)sizeof(tos);
+		if(getsockopt(fd, IPPROTO_IPV6, IPV6_TCLASS, &tos,&slen)<0) {
+			perror("get TCLASS on socket");
+			return -1;
+		}
+#endif
+	} else {
+#if !defined(IP_TOS)
+		UNUSED_ARG(fd);
+		do { return TOS_IGNORE; } while(0);
+#else
+		socklen_t slen = (socklen_t)sizeof(tos);
+		if(getsockopt(fd, IPPROTO_IP, IP_TOS, &tos,&slen)<0) {
+			perror("get TOS on socket");
+			return -1;
+		}
+#endif
+	}
+
+	CORRECT_RAW_TOS(tos);
+
+	return tos;
+}
+
+int set_raw_socket_ttl(evutil_socket_t fd, int family, int ttl)
+{
+
+	if(family == AF_INET6) {
+#if !defined(IPV6_UNICAST_HOPS)
+		UNUSED_ARG(fd);
+		UNUSED_ARG(ttl);
+#else
+		CORRECT_RAW_TTL(ttl);
+		if(setsockopt(fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &ttl,sizeof(ttl))<0) {
+			perror("set HOPLIMIT on socket");
+			return -1;
+		}
+#endif
+	} else {
+#if !defined(IP_TTL)
+		UNUSED_ARG(fd);
+		UNUSED_ARG(ttl);
+#else
+		CORRECT_RAW_TTL(ttl);
+		if(setsockopt(fd, IPPROTO_IP, IP_TTL, &ttl,sizeof(ttl))<0) {
+			perror("set TTL on socket");
+			return -1;
+		}
+#endif
+	}
+
+	return 0;
+}
+
+int set_raw_socket_tos(evutil_socket_t fd, int family, int tos)
+{
+
+	if(family == AF_INET6) {
+#if !defined(IPV6_TCLASS)
+		UNUSED_ARG(fd);
+		UNUSED_ARG(tos);
+#else
+		CORRECT_RAW_TOS(tos);
+		if(setsockopt(fd, IPPROTO_IPV6, IPV6_TCLASS, &tos,sizeof(tos))<0) {
+			perror("set TCLASS on socket");
+			return -1;
+		}
+#endif
+	} else {
+#if !defined(IP_TOS)
+		UNUSED_ARG(fd);
+		UNUSED_ARG(tos);
+#else
+		if(setsockopt(fd, IPPROTO_IP, IP_TOS, &tos,sizeof(tos))<0) {
+			perror("set TOS on socket");
+			return -1;
+		}
+#endif
+	}
+
+	return 0;
+}
+
 //////////////////// socket error handle ////////////////////
 
 int handle_socket_error() {
@@ -549,7 +674,7 @@ void set_execdir(void)
   /* On some systems, this may give us the execution path */
   char *_var = getenv("_");
   if(_var && *_var) {
-    _var = strdup(_var);
+    _var = turn_strdup(_var);
     char *edir=_var;
     if(edir[0]!='.') 
       edir = strstr(edir,"/");
@@ -559,7 +684,7 @@ void set_execdir(void)
       edir = dirname(_var);
     if(c_execdir)
       turn_free(c_execdir,strlen(c_execdir)+1);
-    c_execdir = strdup(edir);
+    c_execdir = turn_strdup(edir);
     turn_free(_var,strlen(_var)+1);
   }
 }
@@ -604,7 +729,7 @@ char* find_config_file(const char *config_file, int print_file_name)
 			FILE *f = fopen(config_file, "r");
 			if (f) {
 				fclose(f);
-				full_path_to_config_file = strdup(config_file);
+				full_path_to_config_file = turn_strdup(config_file);
 			}
 		} else {
 			int i = 0;
@@ -826,15 +951,6 @@ static const char* turn_get_method(const SSL_METHOD *method, const char* mdefaul
 		if(!method)
 			return mdefault;
 		else {
-
-#ifndef OPENSSL_NO_SSL2
-			if(method == SSLv2_server_method()) {
-					return "SSLv2";
-			} else if(method == SSLv2_client_method()) {
-					return "SSLv2";
-			} else
-#endif
-
 			if(method == SSLv3_server_method()) {
 				return "SSLv3";
 			} else if(method == SSLv3_client_method()) {

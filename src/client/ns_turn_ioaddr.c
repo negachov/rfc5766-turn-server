@@ -29,6 +29,8 @@
  */
 
 #include "ns_turn_ioaddr.h"
+#include <netdb.h>
+#include <string.h>
 
 //////////////////////////////////////////////////////////////
 
@@ -90,7 +92,7 @@ u32bits hash_int32(u32bits a)
 u64bits hash_int64(u64bits a)
 {
 	a = a ^ (a>>4);
-	a = (a^0xdeadbeef) + (a<<5);
+	a = (a^0xdeadbeefdeadbeefLL) + (a<<5);
 	a = a ^ (a>>11);
 	return a;
 }
@@ -141,18 +143,19 @@ void addr_cpy6(ioa_addr* dst, const struct sockaddr_in6* src) {
 }
 
 int addr_eq(const ioa_addr* a1, const ioa_addr *a2) {
+
   if(!a1) return (!a2);
+  else if(!a2) return (!a1);
 
   if(a1->ss.sa_family == a2->ss.sa_family) {
-    if(a1->ss.sa_family == AF_INET) {
-      if((int)a1->s4.sin_addr.s_addr == (int)a2->s4.sin_addr.s_addr 
-	 && a1->s4.sin_port == a2->s4.sin_port) {
+    if(a1->ss.sa_family == AF_INET && a1->s4.sin_port == a2->s4.sin_port) {
+      if((int)a1->s4.sin_addr.s_addr == (int)a2->s4.sin_addr.s_addr) {
 	return 1;
       }
-    } else if(a1->ss.sa_family == AF_INET6) {
+    } else if(a1->ss.sa_family == AF_INET6 && a1->s6.sin6_port == a2->s6.sin6_port) {
       const u64bits *p1=(const u64bits *)(&(a1->s6.sin6_addr));
       const u64bits *p2=(const u64bits *)(&(a2->s6.sin6_addr));
-      if(p1[0]==p2[0] && p1[1]==p2[1] && a1->s6.sin6_port == a2->s6.sin6_port) {
+      if(p1[0]==p2[0] && p1[1]==p2[1]) {
 	return 1;
       }
     }
@@ -162,7 +165,9 @@ int addr_eq(const ioa_addr* a1, const ioa_addr *a2) {
 }
 
 int addr_eq_no_port(const ioa_addr* a1, const ioa_addr *a2) {
+
   if(!a1) return (!a2);
+  else if(!a2) return (!a1);
   
   if(a1->ss.sa_family == a2->ss.sa_family) {
     if(a1->ss.sa_family == AF_INET) {
@@ -180,26 +185,98 @@ int addr_eq_no_port(const ioa_addr* a1, const ioa_addr *a2) {
   return 0;
 }
 
-int make_ioa_addr(const u08bits* saddr, int port, ioa_addr *addr) {
+int make_ioa_addr(const u08bits* saddr0, int port, ioa_addr *addr) {
 
-  if(!saddr || !addr) return -1;
+  if(!saddr0 || !addr) return -1;
+
+  char ssaddr[257];
+  STRCPY(ssaddr,saddr0);
+
+  char* saddr=ssaddr;
+  while(*saddr == ' ') ++saddr;
+
+  size_t len=strlen(saddr);
+  while(len>0) {
+	  if(saddr[len-1]==' ') {
+		  saddr[len-1]=0;
+		  --len;
+	  } else {
+		  break;
+	  }
+  }
 
   ns_bzero(addr, sizeof(ioa_addr));
-  if((strlen((const s08bits*)saddr) == 0)||
-     (inet_pton(AF_INET, (const s08bits*)saddr, &addr->s4.sin_addr) == 1)) {
+  if((len == 0)||
+     (inet_pton(AF_INET, saddr, &addr->s4.sin_addr) == 1)) {
     addr->s4.sin_family = AF_INET;
 #if defined(TURN_HAS_SIN_LEN) /* tested when configured */
     addr->s4.sin_len = sizeof(struct sockaddr_in);
 #endif
     addr->s4.sin_port = nswap16(port);
-  } else if (inet_pton(AF_INET6, (const s08bits*)saddr, &addr->s6.sin6_addr) == 1) {
+  } else if (inet_pton(AF_INET6, saddr, &addr->s6.sin6_addr) == 1) {
     addr->s6.sin6_family = AF_INET6;
 #if defined(SIN6_LEN) /* this define is required by IPv6 if used */
     addr->s6.sin6_len = sizeof(struct sockaddr_in6);
 #endif
     addr->s6.sin6_port = nswap16(port);
   } else {
-    return -1;
+    struct addrinfo addr_hints;
+    struct addrinfo *addr_result = NULL;
+    int err;
+
+    memset(&addr_hints, 0, sizeof(struct addrinfo));
+    addr_hints.ai_family = AF_UNSPEC;    /* Allow IPv4 or IPv6 */
+    addr_hints.ai_socktype = SOCK_DGRAM; /* Datagram socket */
+    addr_hints.ai_flags = AI_PASSIVE;    /* For wildcard IP address */
+    addr_hints.ai_protocol = 0;          /* Any protocol */
+    addr_hints.ai_canonname = NULL;
+    addr_hints.ai_addr = NULL;
+    addr_hints.ai_next = NULL;
+
+    err = getaddrinfo(saddr, NULL, &addr_hints, &addr_result);
+    if ((err != 0)||(!addr_result)) {
+      fprintf(stderr,"error resolving '%s' hostname: %s\n",saddr,gai_strerror(err));
+      return -1;
+    }
+    
+    int family = AF_INET;
+    struct addrinfo *addr_result_orig = addr_result;
+    int found = 0;
+
+    beg_af:
+
+    while(addr_result) {
+
+    	if(addr_result->ai_family == family) {
+    		if (addr_result->ai_family == AF_INET) {
+    			ns_bcopy(addr_result->ai_addr, addr, addr_result->ai_addrlen);
+    			addr->s4.sin_port = nswap16(port);
+#if defined(TURN_HAS_SIN_LEN) /* tested when configured */
+    			addr->s4.sin_len = sizeof(struct sockaddr_in);
+#endif
+    			found = 1;
+    			break;
+    		} else if (addr_result->ai_family == AF_INET6) {
+    			ns_bcopy(addr_result->ai_addr, addr, addr_result->ai_addrlen);
+    			addr->s6.sin6_port = nswap16(port);
+#if defined(SIN6_LEN) /* this define is required by IPv6 if used */
+    			addr->s6.sin6_len = sizeof(struct sockaddr_in6);
+#endif
+    			found = 1;
+    			break;
+    		}
+    	}
+
+    	addr_result = addr_result->ai_next;
+    }
+
+    if(!found && family == AF_INET) {
+    	family = AF_INET6;
+    	addr_result = addr_result_orig;
+    	goto beg_af;
+    }
+    
+    freeaddrinfo(addr_result_orig);
   }
 
   return 0;
@@ -247,7 +324,7 @@ int make_ioa_addr_from_full_string(const u08bits* saddr, int default_port, ioa_a
 
 	int ret = -1;
 	int port = 0;
-	char* s = strdup((const char*)saddr);
+	char* s = turn_strdup((const char*)saddr);
 	char *sa = get_addr_string_and_port(s,&port);
 	if(sa) {
 		if(port<1)

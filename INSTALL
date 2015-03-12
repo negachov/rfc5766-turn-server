@@ -13,7 +13,7 @@ in /usr/ports/net/turnserver directory. Installation is very simple:
   $ cd /usr/ports/net/turnserver
   $ sudo make install clean
   
-2) Debian "jessie" (and the recent version of Ubuntu and Mint)  
+2) Debian "jessie" (and the recent versions of Ubuntu and Mint)  
 have this project packaged as "rfc5766-turn-server", see the link:
 
 http://packages.qa.debian.org/r/rfc5766-turn-server.html
@@ -21,6 +21,34 @@ http://packages.qa.debian.org/r/rfc5766-turn-server.html
 In the new Debian "jessie", and in the related Ubuntu and Mint, you will 
 be able to just select rfc5766-turn-server from the packages list and 
 install it through Synaptic or through the package manager.
+
+If you are using the Debian package from the project download site, then follow these instructions:
+
+Unpack the archive:
+
+ $ tar xvfz turnserver-<...>.tar.gz
+ 
+Read the INSTALl file:
+
+ $ cat INSTALL
+ 
+Install the *.deb file:
+
+  $ sudo apt-get update
+  $ sudo apt-get install gdebi-core
+  $ sudo gdebi rfc5766*.deb
+
+(to install the bare package without any dependencies, type:
+
+  $ sudo dpkg -i rfc5766-turn-server_*_*.deb)
+
+After the install, read the documentation in /usr/share/doc/rfc5766-turn-server directory.
+
+All binaries will be installed in /usr/bin/ directory. 
+The turn*.conf config files are in /etc directory. 
+
+The service start-up control scripts will be in /etc/init.d/rfc5766-turn-server and
+in /etc/defaults/rfc5766-turn-server files.
 
 3) ArchLinux has a TURN server package:
 
@@ -204,19 +232,19 @@ The following platforms have been used in the development:
 	- FreeBSD 8.x, i386
 	- PC-BSD 9.x, x86_64
 	- Solaris 11, x86_64
-	- Linux CentOS / Red Hat Enterprise Edition 6.3, x86_64 (amd64)
-	- Linux CentOS / Red Hat Enterprise Edition 6.4, x86_32 (i386)
+	- Linux CentOS / Red Hat Enterprise Edition 6.x-7.0, x86_64 (i386 & amd64)
 	- Linux Debian 'Squeeze', i386
 	- Linux Mint 14.1 'Nadia', i386
+	- Linux Mint 16 'Petra', i386
 	- Linux Debian 'Wheezy', x86_64 
 	- Cygwin 1.7.20
-	- NetBSD 6.0.1
-	- OpenBSD 5.3
-	- Amazon Linux
+	- NetBSD 6.0.1, i386
+	- OpenBSD 5.3, i386
+	- Amazon Linux, x86_64
 	- Mac OS X Mountain Lion
-	- ArchLinux
-	- Fedora 19
-	- OpenSUSE 12.3 x86_64
+	- ArchLinux, x86_64
+	- Fedora 19 and 20, x86_64
+	- OpenSUSE 12.3, x86_64
 
 It must work on many other *NIXes, as well. The configure script and/or 
 Makefile may need adjustments for other *NIXes not mentioned above.
@@ -667,7 +695,7 @@ The schema description:
 #
 CREATE TABLE turnusers_lt (
     name varchar(512) PRIMARY KEY,
-    hmackey char(32)
+    hmackey char(128)
 );
 
 # Table for short-term credentials mechanism authorisation:
@@ -698,11 +726,14 @@ CREATE TABLE denied_peer_ip (
 );
 
 
-The field hmackey contains HEX string representation of the 128 bits key.
+The field hmackey contains HEX string representation of the key.
 We do not store the user open passwords for long-term credentials, for security reasons.
 Storing only the HMAC key has its own implications - if you change the realm,
 you will have to update the HMAC keys of all users, because the realm is 
 used for the HMAC key generation.
+
+The key must be 32 characters (HEX representation of 16 bytes) for SHA1,
+or 64 characters (HEX representation of 32 bytes) for SHA256.
 
 You can use turnadmin program to manage the database - you can either use 
 turnadmin to add/modify/delete users, or you can use turnadmin to produce 
@@ -746,6 +777,9 @@ Fill in users, for example:
   
   $ bin/turnadmin -a -e "host=localhost dbname=turn user=turn password=turn" -u gorst -r north.gov -p hero
   $ bin/turnadmin -a -e "host=localhost dbname=turn user=turn password=turn" -u ninefingers -r north.gov -p youhavetoberealistic
+  
+  Long-term credentials mechanism with SHA256 extension:
+  $ bin/turnadmin -a -e "host=localhost dbname=turn user=turn password=turn" -u bethod -r north.gov -p king-of-north --sha256
   
   Short-term credentials mechanism:
    
@@ -799,6 +833,9 @@ the root account.
   $ bin/turnadmin -a -M "host=localhost dbname=turn user=turn password=turn" -u gorst -r north.gov -p hero
   $ bin/turnadmin -a -M "host=localhost dbname=turn user=turn password=turn" -u ninefingers -r north.gov -p youhavetoberealistic
   
+  Long-term credentials mechanism with SHA256 extension:
+  $ bin/turnadmin -a -M "host=localhost dbname=turn user=turn password=turn" -u bethod -r north.gov -p king-of-north --sha256
+  
   Short-term credentials mechanism:
    
   $ bin/turnadmin -A -M "host=localhost dbname=turn user=turn password=turn" -u gorst -r north.gov -p hero
@@ -826,11 +863,20 @@ Or in the turnserver.conf file:
 
 mysql-userdb="host=localhost dbname=turn user=turn password=turn connect_timeout=30"
 
+If you have to use a secure MySQL connection (SSL) then you have to use also
+the optional connection string parameters for the secure communications:
+ca, capath, cert, key, cipher (see 
+http://dev.mysql.com/doc/refman/5.1/en/ssl-options.html for the command options 
+description).
+
 XVI. Redis setup
 
 The Redis setup is well documented on their site http://redis.io. 
 The TURN Server Redis database schema description can be found 
-in turndb/schema.*.redis files.
+in schema.userdb.redis and schema.stats.redis files. Those files are located
+either in the turndb subdirectory of the main source code directory,
+or in /usr/local/share/turnserver/ after the installation, or somewhere in /usr/share/
+directory, depending on the OS and on the instalation package.
 
 If the TURN server was compiled with Hiredis support (Hiredis is the C client 
 library for Redis), then we can use the TURN server database parameter 
@@ -872,6 +918,25 @@ timeout 0
 ..........
 tcp-keepalive 60
 ..........
+
+Redis TURN admin commands:
+
+  Shared secret for the TURN REST API:
+  
+  $ bin/turnadmin -s logen -N "host=localhost dbname=0 user=turn password=turn"
+  
+  Long-term credentials mechanism:
+  
+  $ bin/turnadmin -a -N "host=localhost dbname=0 user=turn password=turn" -u gorst -r north.gov -p hero
+  $ bin/turnadmin -a -N "host=localhost dbname=0 user=turn password=turn" -u ninefingers -r north.gov -p youhavetoberealistic
+  
+  Long-term credentials mechanism with SHA256 extension:
+  $ bin/turnadmin -a -N "host=localhost dbname=0 user=turn password=turn" -u bethod -r north.gov -p king-of-north --sha256
+  
+  Short-term credentials mechanism:
+   
+  $ bin/turnadmin -A -N "host=localhost dbname=0 user=turn password=turn" -u gorst -r north.gov -p hero
+  $ bin/turnadmin -A -N "host=localhost dbname=0 user=turn password=turn" -u ninefingers -r north.gov -p youhavetoberealistic 
 
 XV. Performance tuning
 

@@ -542,6 +542,7 @@ SYSTEM=`uname`
 if [ "${SYSTEM}" = "SunOS" ] ; then
 # Solaris ? is this you ?!
     OSCFLAGS="${OSCFLAGS} -D__EXTENSIONS__ -D_XOPEN_SOURCE=500"
+    OSLIBS="${OSLIBS} -lnsl"
 fi
 
 #########################
@@ -712,8 +713,9 @@ fi
 # or Clang compiler flags
 ###########################
 
+GNUOSCFLAGS="-g ${GNUOSCFLAGS}"
 GNUOSCFLAGS="${GNUOSCFLAGS} -Wall -Wno-deprecated-declarations -Wextra -Wformat-security -Wnested-externs -Wstrict-prototypes  -Wmissing-prototypes -Wpointer-arith -Wcast-qual"
-GNUOSCFLAGS="${GNUOSCFLAGS} -Wno-write-strings"
+GNUOSCFLAGS="${GNUOSCFLAGS}"
 
 ${CC} -Werror ${GNUOSCFLAGS} ${TMPCPROGC} ${OSCFLAGS} -o ${TMPCPROGB} 2>>/dev/null
 ER=$?
@@ -722,26 +724,26 @@ if ! [ ${ER} -eq 0 ] ; then
     ${CC} -Wall ${TMPCPROGC} ${OSCFLAGS} -o ${TMPCPROGB} 2>>/dev/null
     ER=$?
     if ! [ ${ER} -eq 0 ] ; then
-	${ECHO_CMD} "Not an ordinary GNU or Clang compiler"
+		${ECHO_CMD} "Not an ordinary GNU or Clang compiler"
     else
-	${ECHO_CMD} "g++ or something..."
-	GNUOSCFLAGS="-Wall -Wno-deprecated-declarations -Wextra -Wformat-security -Wpointer-arith -Wcast-qual -Wno-write-strings"
-	${CC} -Werror ${GNUOSCFLAGS} ${TMPCPROGC} ${OSCFLAGS} -o ${TMPCPROGB} 2>>/dev/null
-	ER=$?
-	if ! [ ${ER} -eq 0 ] ; then
-	    ${ECHO_CMD} "Not an ordinary g++ compiler"
-	    GNUOSCFLAGS="-x c++ -Wall -Wno-deprecated-declarations -Wextra -Wformat-security -Wpointer-arith -Wcast-qual -Wno-write-strings"
-	    ${CC} -Werror ${GNUOSCFLAGS} ${TMPCPROGC} ${OSCFLAGS} -o ${TMPCPROGB} 2>>/dev/null
-	    ER=$?
-	    if ! [ ${ER} -eq 0 ] ; then
-	    	${ECHO_CMD} "Not an ordinary c++ compiler"
-	    else
-		${ECHO_CMD} "Clang++ compiler ?"
+		${ECHO_CMD} "g++ or something..."
+		GNUOSCFLAGS="-g -Wall -Wno-deprecated-declarations -Wextra -Wformat-security -Wpointer-arith -Wcast-qual"
+		${CC} -Werror ${GNUOSCFLAGS} ${TMPCPROGC} ${OSCFLAGS} -o ${TMPCPROGB} 2>>/dev/null
+		ER=$?
+		if ! [ ${ER} -eq 0 ] ; then
+	    	${ECHO_CMD} "Not an ordinary g++ compiler"
+	    	GNUOSCFLAGS="-x c++ -g -Wall -Wno-deprecated-declarations -Wextra -Wformat-security -Wpointer-arith -Wcast-qual"
+	    	${CC} -Werror ${GNUOSCFLAGS} ${TMPCPROGC} ${OSCFLAGS} -o ${TMPCPROGB} 2>>/dev/null
+	    	ER=$?
+	    	if ! [ ${ER} -eq 0 ] ; then
+	    		${ECHO_CMD} "Not an ordinary c++ compiler"
+	    	else
+				${ECHO_CMD} "Clang++ compiler ?"
+	    		OSCFLAGS="${GNUOSCFLAGS} ${OSCFLAGS}"
+	    	fi
+		else
 	    	OSCFLAGS="${GNUOSCFLAGS} ${OSCFLAGS}"
-	    fi
-	else
-	    OSCFLAGS="${GNUOSCFLAGS} ${OSCFLAGS}"
-	fi
+		fi
     fi
 else
     OSCFLAGS="${GNUOSCFLAGS} ${OSCFLAGS}"
@@ -753,8 +755,6 @@ fi
 ###########################
 
 testlib socket
-testlib nsl
-testlib dl
 testlib rt
 testlib wldap32
 ER=$?
@@ -864,13 +864,12 @@ fi
 testlib event_core
 ER=$?
 if ! [ ${ER} -eq 0 ] ; then
-    testlib event_extra
     ${ECHO_CMD} "Libevent2 runtime found."
 else
     testlib event
     ER=$?
     if ! [ ${ER} -eq 0 ] ; then
-		${ECHO_CMD} "Libevent2 runtime found."
+		${ECHO_CMD} "Libevent2 runtime found (old style)."
     else
 		${ECHO_CMD} "ERROR: Libevent2 runtime libraries are not installed properly in required location."
 		${ECHO_CMD} "See the INSTALL file."

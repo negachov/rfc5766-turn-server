@@ -113,6 +113,11 @@ User database settings:
 		Also, see http://www.mysql.org or http://mariadb.org 
 		for full MySQL documentation.
 		
+		Optional connection string parameters for the secure communications (SSL): 
+		ca, capath, cert, key, cipher 
+		(see http://dev.mysql.com/doc/refman/5.1/en/ssl-options.html for the 
+		command options description).
+		
 -N, --redis-userdb	User database connection string for Redis. 
 		This database can be used for long-term and short-term credentials mechanisms,
 		and it can store the secret value for secret-based timed authentication in TURN RESP API.
@@ -154,9 +159,9 @@ Flags:
 			is to support "TURN Server REST API" as described in
 			the TURN REST API section below.
 			This option uses timestamp as part of combined username:
-			usercombo -> "user_id:timestamp",
+			usercombo -> "timestamp:username",
 			turn user -> usercombo,
-			turn password -> base64(hmac(secret key, usercombo)).
+			turn password -> base64(hmac(input_buffer = usercombo, key = shared-secret)).
 			This allows TURN credentials to be accounted for a specific user id.
 			If you don't have a suitable id, the timestamp alone can be used.
 			This option is just turns on secret-based authentication.
@@ -168,8 +173,6 @@ Flags:
 --dh566			Use 566 bits predefined DH TLS key. Default size of the key is 1066.
 
 --dh2066		Use 2066 bits predefined DH TLS key. Default size of the key is 1066.
-
---no-sslv2		Do not allow SSLv2 protocol.
 
 --no-sslv3		Do not allow SSLv3 protocol.
 
@@ -201,6 +204,10 @@ Flags:
 			the log file only (unless the log file itself is stdout).
 			
 --syslog		With this flag, all log will be redirected to the system log (syslog).
+
+--simple-log	This flag means that no log file rollover will be used, and the log file
+				name will be constructed as-is, without PID and date appendage.
+				This option can be used, for example, together with the logrotate tool.
 				
 --secure-stun		Require authentication of the STUN Binding request.
 			By default, the clients are allowed anonymous access to the STUN Binding functionality.
@@ -217,10 +224,8 @@ Flags:
 			(224.0.0.0 and above, and FFXX:*).
 
 --sha256		Require SHA256 digest function to be used for the message integrity.
-			By default, the server accepts both SHA1 (as per TURN standard specs) 
-			and SHA256 (as an extension) functions and the server switches to SHA256 
-			only if the client session uses it. With this option, the server always 
-			requires the stronger SHA256 function. The client application must support
+			By default, the server uses SHA1 hashes. With this option, the server 
+			requires the stronger SHA256 hashes. The client application must support
 			SHA256 hash function if this option is used. If the server obtains a message 
 			from the client with a weaker (SHA1) hash function then the server returns 
 			error code 426.
@@ -271,7 +276,7 @@ Options with required values:
 			endpoints (the "plain" one and the "tls" one) are equivalent in terms of
 			functionality; but we keep both endpoints to satisfy the RFC 5766 specs.
 			For secure TCP connections, we currently support SSL version 3 and 
-			TLS versions 1.0, 1.1, 1.2. SSL2 "encapsulation mode" is also supported.
+			TLS versions 1.0, 1.1, 1.2.
 			For secure UDP connections, we support DTLS version 1.
 
 --alt-listening-port	Alternative listening port for UDP and TCP listeners;
@@ -329,9 +334,10 @@ Options with required values:
 				
 -m, --relay-threads	Number of relay threads to handle the established connections
 			(in addition to authentication thread and the listener thread).
-			If set to 0 then application runs relay process in a single thread,
+			If explicitly set to 0 then application runs relay process in a single thread,
 			in the same thread with the listener process (the authentication thread will 
-			still be a separate thread). In older systems (before Linux kernel 3.9),
+			still be a separate thread). If not set then the default threading policy
+			will be employed. In older systems (before Linux kernel 3.9),
 			the number of UDP threads is always one threads per network listening endpoint -
 			unless "-m 0" or "-m 1" is set.
 
@@ -358,7 +364,7 @@ Options with required values:
 -r, --realm		Realm to be used for all users. Must be used with long-term credentials mechanism 
 			or with TURN REST API.
 
--C, --rest-api-separator	This is the username/timestamp separator symbol (character) in TURN REST API.
+-C, --rest-api-separator	This is the timestamp/username separator symbol (character) in TURN REST API.
 				The default value is :.
 
 -q, --user-quota	Per-user allocations quota: how many concurrent 
@@ -374,8 +380,9 @@ Options with required values:
 			(both in the database and in the "static" fashion).
 
 -s, --max-bps		Max bytes-per-second bandwidth a TURN session is allowed to handle
-			(input and output network streams combined). Anything above that limit
-			will be dropped.
+			(input and output network streams are treated separately). Anything above 
+			that limit will be dropped or temporary suppressed (within the
+			available buffer limits).
 
 --cert			Certificate file, PEM format. Same file 
 			search rules applied as for the configuration 
@@ -412,7 +419,9 @@ Options with required values:
 			definite log file name.
 			The special names are "stdout" and "-" - they will force everything 
 			to the stdout. Also, "syslog" name will redirect everything into
-			the system log (syslog), as if the option "--syslog" was set.
+			the system log (syslog), as if the option "--syslog" was set. 
+			In the runtime, the logfile can be reset with the SIGHUP signal 
+			to the turnserver process.
 				
 --alternate-server	Option to set the "redirection" mode. The value of this option
 			will be the address of the alternate server for UDP & TCP service in form of 
@@ -575,7 +584,7 @@ too.
 
 The temporary user is generated as:
 
-temporary-username="username" + ":" + "timestamp"
+temporary-username="timestamp" + ":" + "username"
 
 where username is the persistent user name, and the timestamp format is just 
 seconds sinse 1970 - the same value as time(NULL) function returns.
@@ -864,6 +873,8 @@ SEE ALSO
 	
 	Po-sheng Lin <personlin118@gmail.com>
 	
-	Peter Dunkley <peter.dunkley@crocodilertc.net>
+	Peter Dunkley <peter.dunkley@acision.com>
 	
 	Mutsutoshi Yoshimoto <mutsutoshi.yoshimoto@mixi.co.jp>
+
+	Bradley T. Hughes <bradleythughes@fastmail.fm>

@@ -51,11 +51,12 @@ long turn_random(void)
 	return ret;
 }
 
-void turn_random32_size(u32bits *ar, size_t sz)
+static void turn_random_tid_size(void *id)
 {
-	if(!RAND_bytes((unsigned char *)ar, sz<<2)<0) {
+	u32bits *ar=(u32bits*)id;
+	if(!RAND_pseudo_bytes((unsigned char *)ar,12)) {
 		size_t i;
-		for(i=0;i<sz;++i) {
+		for(i=0;i<3;++i) {
 			ar[i] = (u32bits)random();
 		}
 	}
@@ -66,16 +67,16 @@ int stun_calculate_hmac(const u08bits *buf, size_t len, const u08bits *key, size
 	ERR_clear_error();
 	UNUSED_ARG(shatype);
 
-#if !defined(OPENSSL_NO_SHA256)
-#if OPENSSL_VERSION_NUMBER >= 0x10000000L
 	if(shatype == SHATYPE_SHA256) {
+#if !defined(OPENSSL_NO_SHA256) && defined(SHA256_DIGEST_LENGTH)
 	  if (!HMAC(EVP_sha256(), key, keylen, buf, len, hmac, hmac_len)) {
 	    return -1;
 	  }
+#else
+	  fprintf(stderr,"SHA256 is not supported\n");
+	  return -1;
+#endif
 	} else
-#endif
-#endif
-
 	  if (!HMAC(EVP_sha1(), key, keylen, buf, len, hmac, hmac_len)) {
 	    return -1;
 	  }
@@ -83,15 +84,17 @@ int stun_calculate_hmac(const u08bits *buf, size_t len, const u08bits *key, size
 	return 0;
 }
 
-int stun_produce_integrity_key_str(u08bits *uname, u08bits *realm, u08bits *upwd, hmackey_t key)
+int stun_produce_integrity_key_str(u08bits *uname, u08bits *realm, u08bits *upwd, hmackey_t key, SHATYPE shatype)
 {
-	MD5_CTX ctx;
+	ERR_clear_error();
+	UNUSED_ARG(shatype);
+
 	size_t ulen = strlen((s08bits*)uname);
 	size_t rlen = strlen((s08bits*)realm);
 	size_t plen = strlen((s08bits*)upwd);
 	size_t sz = ulen+1+rlen+1+plen+1+10;
 	size_t strl = ulen+1+rlen+1+plen;
-	u08bits *str = (u08bits*)malloc(sz+1);
+	u08bits *str = (u08bits*)turn_malloc(sz+1);
 
 	strncpy((s08bits*)str,(s08bits*)uname,sz);
 	str[ulen]=':';
@@ -100,10 +103,26 @@ int stun_produce_integrity_key_str(u08bits *uname, u08bits *realm, u08bits *upwd
 	strncpy((s08bits*)str+ulen+1+rlen+1,(s08bits*)upwd,sz-ulen-1-rlen-1);
 	str[strl]=0;
 
-	MD5_Init(&ctx);
-	MD5_Update(&ctx,str,strl);
-	MD5_Final(key,&ctx);
-	free(str);
+	if(shatype == SHATYPE_SHA256) {
+#if !defined(OPENSSL_NO_SHA256) && defined(SHA256_DIGEST_LENGTH)
+		unsigned int keylen = 0;
+		EVP_MD_CTX ctx;
+		EVP_DigestInit(&ctx,EVP_sha256());
+		EVP_DigestUpdate(&ctx,str,strl);
+		EVP_DigestFinal(&ctx,key,&keylen);
+		EVP_MD_CTX_cleanup(&ctx);
+#else
+		fprintf(stderr,"SHA256 is not supported\n");
+		return -1;
+#endif
+	} else {
+		MD5_CTX ctx;
+		MD5_Init(&ctx);
+		MD5_Update(&ctx,str,strl);
+		MD5_Final(key,&ctx);
+	}
+
+	turn_free(str,sz+1);
 
 	return 0;
 }
@@ -771,12 +790,14 @@ int stun_set_binding_response_str(u08bits* buf, size_t *len, stun_tid* tid,
 		} else {
 			old_stun_init_success_response_str(STUN_METHOD_BINDING, buf, len, tid, cookie);
 		}
-		if(!old_stun) {
+		if(!old_stun && reflexive_addr) {
 			if (stun_attr_add_addr_str(buf, len, STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS, reflexive_addr) < 0)
 				return -1;
 		}
-		if (stun_attr_add_addr_str(buf, len, STUN_ATTRIBUTE_MAPPED_ADDRESS, reflexive_addr) < 0)
-			return -1;
+		if(reflexive_addr) {
+			if (stun_attr_add_addr_str(buf, len, STUN_ATTRIBUTE_MAPPED_ADDRESS, reflexive_addr) < 0)
+				return -1;
+		}
 	} else if (!old_stun) {
 		stun_init_error_response_str(STUN_METHOD_BINDING, buf, len, error_code, reason, tid);
 	} else {
@@ -857,8 +878,7 @@ void stun_tid_message_cpy(u08bits* buf, const stun_tid* id) {
 
 void stun_tid_generate(stun_tid* id) {
   if(id) {
-    u32bits *w=(u32bits*)(id->tsx_id);
-    turn_random32_size(w,3);
+    turn_random_tid_size(id->tsx_id);
   }
 }
 
@@ -1312,9 +1332,16 @@ int SASLprep(u08bits *s)
 
 //////////////// Message Integrity ////////////////////////////
 
+size_t get_hmackey_size(SHATYPE shatype)
+{
+	if(shatype == SHATYPE_SHA256)
+		return 32;
+	return 16;
+}
+
 void print_bin_func(const char *name, size_t len, const void *s, const char *func)
 {
-	printf("%s:%s:len=%d:[",func,name,(int)len);
+	printf("<%s>:<%s>:len=%d:[",func,name,(int)len);
 	size_t i;
 	for(i=0;i<len;i++) {
 		printf("%02x",(int)((const u08bits*)s)[i]);
@@ -1343,7 +1370,7 @@ int stun_attr_add_integrity_str(turn_credential_type ct, u08bits *buf, size_t *l
 		if(stun_calculate_hmac(buf, *len-4-shasize, pwd, strlen((char*)pwd), buf+*len-shasize, &shasize, shatype)<0)
 				return -1;
 	} else {
-		if(stun_calculate_hmac(buf, *len-4-shasize, key, sizeof(hmackey_t), buf+*len-shasize, &shasize, shatype)<0)
+		if(stun_calculate_hmac(buf, *len-4-shasize, key, get_hmackey_size(shatype), buf+*len-shasize, &shasize, shatype)<0)
 			return -1;
 	}
 
@@ -1354,7 +1381,7 @@ int stun_attr_add_integrity_by_user_str(u08bits *buf, size_t *len, u08bits *unam
 {
 	hmackey_t key;
 
-	if(stun_produce_integrity_key_str(uname, realm, upwd, key)<0)
+	if(stun_produce_integrity_key_str(uname, realm, upwd, key, shatype)<0)
 		return -1;
 
 	if(stun_attr_add_str(buf, len, STUN_ATTRIBUTE_USERNAME, uname, strlen((s08bits*)uname))<0)
@@ -1392,7 +1419,7 @@ void print_hmac(const char *name, const void *s, size_t len)
 /*
  * Return -1 if failure, 0 if the integrity is not correct, 1 if OK
  */
-int stun_check_message_integrity_by_key_str(turn_credential_type ct, u08bits *buf, size_t len, hmackey_t key, st_password_t pwd, SHATYPE *shatype)
+int stun_check_message_integrity_by_key_str(turn_credential_type ct, u08bits *buf, size_t len, hmackey_t key, st_password_t pwd, SHATYPE shatype, int *too_weak)
 {
 	int res = 0;
 	u08bits new_hmac[MAXSHASIZE];
@@ -1408,11 +1435,16 @@ int stun_check_message_integrity_by_key_str(turn_credential_type ct, u08bits *bu
 	switch(sarlen) {
 	case SHA256SIZEBYTES:
 		shasize = SHA256SIZEBYTES;
-		*shatype = SHATYPE_SHA256;
+		if(shatype != SHATYPE_SHA256)
+			return -1;
 		break;
 	case SHA1SIZEBYTES:
 		shasize = SHA1SIZEBYTES;
-		*shatype = SHATYPE_SHA1;
+		if(shatype != SHATYPE_SHA1) {
+			if(too_weak)
+				*too_weak = 1;
+			return -1;
+		}
 		break;
 	default:
 		return -1;
@@ -1430,9 +1462,9 @@ int stun_check_message_integrity_by_key_str(turn_credential_type ct, u08bits *bu
 		return -1;
 
 	if(ct == TURN_CREDENTIALS_SHORT_TERM) {
-		res = stun_calculate_hmac(buf, (size_t) new_len - 4 - shasize, pwd, strlen((char*)pwd), new_hmac, &shasize, *shatype);
+		res = stun_calculate_hmac(buf, (size_t) new_len - 4 - shasize, pwd, strlen((char*)pwd), new_hmac, &shasize, shatype);
 	} else {
-		res = stun_calculate_hmac(buf, (size_t) new_len - 4 - shasize, key, sizeof(hmackey_t), new_hmac, &shasize, *shatype);
+		res = stun_calculate_hmac(buf, (size_t) new_len - 4 - shasize, key, get_hmackey_size(shatype), new_hmac, &shasize, shatype);
 	}
 
 	stun_set_command_message_len_str(buf, orig_len);
@@ -1446,23 +1478,23 @@ int stun_check_message_integrity_by_key_str(turn_credential_type ct, u08bits *bu
 	if(bcmp(old_hmac,new_hmac,shasize))
 		return 0;
 
-	return 1;
+	return +1;
 }
 
 /*
  * Return -1 if failure, 0 if the integrity is not correct, 1 if OK
  */
-int stun_check_message_integrity_str(turn_credential_type ct, u08bits *buf, size_t len, u08bits *uname, u08bits *realm, u08bits *upwd, SHATYPE *shatype)
+int stun_check_message_integrity_str(turn_credential_type ct, u08bits *buf, size_t len, u08bits *uname, u08bits *realm, u08bits *upwd, SHATYPE shatype)
 {
 	hmackey_t key;
 	st_password_t pwd;
 
 	if(ct == TURN_CREDENTIALS_SHORT_TERM)
 		strncpy((char*)pwd,(char*)upwd,sizeof(st_password_t));
-	else if (stun_produce_integrity_key_str(uname, realm, upwd, key) < 0)
+	else if (stun_produce_integrity_key_str(uname, realm, upwd, key, shatype) < 0)
 		return -1;
 
-	return stun_check_message_integrity_by_key_str(ct, buf, len, key, pwd, shatype);
+	return stun_check_message_integrity_by_key_str(ct, buf, len, key, pwd, shatype, NULL);
 }
 
 /* RFC 5780 */

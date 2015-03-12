@@ -125,23 +125,21 @@ const char* get_secrets_list_elem(secrets_list_t *sl, size_t i)
 void add_to_secrets_list(secrets_list_t *sl, const char* elem)
 {
 	if(sl && elem) {
-		sl->secrets = (char**)realloc(sl->secrets,(sizeof(char*)*(sl->sz+1)));
-		sl->secrets[sl->sz] = strdup(elem);
+		sl->secrets = (char**)turn_realloc(sl->secrets,0,(sizeof(char*)*(sl->sz+1)));
+		sl->secrets[sl->sz] = turn_strdup(elem);
 		sl->sz += 1;
 	}
 }
 
 /////////// USER DB CHECK //////////////////
 
-static int convert_string_key_to_binary(char* keysource, hmackey_t key) {
-	if(strlen(keysource)!=(2*sizeof(hmackey_t))) {
-		return -1;
-	} else {
+static int convert_string_key_to_binary(char* keysource, hmackey_t key, size_t sz) {
+	{
 		char is[3];
 		size_t i;
 		unsigned int v;
 		is[2]=0;
-		for(i=0;i<sizeof(hmackey_t);i++) {
+		for(i=0;i<sz;i++) {
 			is[0]=keysource[i*2];
 			is[1]=keysource[i*2+1];
 			sscanf(is,"%02x",&v);
@@ -232,6 +230,13 @@ struct _Myconninfo {
 	char *password;
 	unsigned int port;
 	unsigned int connect_timeout;
+	/* SSL ==>> */
+	char *key;
+	char *ca;
+	char *cert;
+	char *capath;
+	char *cipher;
+	/* <<== SSL : see http://dev.mysql.com/doc/refman/5.0/en/mysql-ssl-set.html */
 };
 
 typedef struct _Myconninfo Myconninfo;
@@ -242,6 +247,11 @@ static void MyconninfoFree(Myconninfo *co) {
 		if(co->dbname) turn_free(co->dbname, strlen(co->dbname)+1);
 		if(co->user) turn_free(co->user, strlen(co->user)+1);
 		if(co->password) turn_free(co->password, strlen(co->password)+1);
+		if(co->key) turn_free(co->key, strlen(co->key)+1);
+		if(co->ca) turn_free(co->ca, strlen(co->ca)+1);
+		if(co->cert) turn_free(co->cert, strlen(co->cert)+1);
+		if(co->capath) turn_free(co->capath, strlen(co->capath)+1);
+		if(co->cipher) turn_free(co->cipher, strlen(co->cipher)+1);
 		ns_bzero(co,sizeof(Myconninfo));
 	}
 }
@@ -251,7 +261,7 @@ static Myconninfo *MyconninfoParse(char *userdb, char **errmsg)
 	Myconninfo *co = (Myconninfo*)turn_malloc(sizeof(Myconninfo));
 	ns_bzero(co,sizeof(Myconninfo));
 	if(userdb) {
-		char *s0=strdup(userdb);
+		char *s0=turn_strdup(userdb);
 		char *s = s0;
 
 		while(s && *s) {
@@ -268,44 +278,44 @@ static Myconninfo *MyconninfoParse(char *userdb, char **errmsg)
 				MyconninfoFree(co);
 				co = NULL;
 				if(errmsg) {
-					*errmsg = strdup(s);
+					*errmsg = turn_strdup(s);
 				}
 				break;
 			}
 
 			*seq = 0;
 			if(!strcmp(s,"host"))
-				co->host = strdup(seq+1);
+				co->host = turn_strdup(seq+1);
 			else if(!strcmp(s,"ip"))
-				co->host = strdup(seq+1);
+				co->host = turn_strdup(seq+1);
 			else if(!strcmp(s,"addr"))
-				co->host = strdup(seq+1);
+				co->host = turn_strdup(seq+1);
 			else if(!strcmp(s,"ipaddr"))
-				co->host = strdup(seq+1);
+				co->host = turn_strdup(seq+1);
 			else if(!strcmp(s,"hostaddr"))
-				co->host = strdup(seq+1);
+				co->host = turn_strdup(seq+1);
 			else if(!strcmp(s,"dbname"))
-				co->dbname = strdup(seq+1);
+				co->dbname = turn_strdup(seq+1);
 			else if(!strcmp(s,"db"))
-				co->dbname = strdup(seq+1);
+				co->dbname = turn_strdup(seq+1);
 			else if(!strcmp(s,"database"))
-				co->dbname = strdup(seq+1);
+				co->dbname = turn_strdup(seq+1);
 			else if(!strcmp(s,"user"))
-				co->user = strdup(seq+1);
+				co->user = turn_strdup(seq+1);
 			else if(!strcmp(s,"uname"))
-				co->user = strdup(seq+1);
+				co->user = turn_strdup(seq+1);
 			else if(!strcmp(s,"name"))
-				co->user = strdup(seq+1);
+				co->user = turn_strdup(seq+1);
 			else if(!strcmp(s,"username"))
-				co->user = strdup(seq+1);
+				co->user = turn_strdup(seq+1);
 			else if(!strcmp(s,"password"))
-				co->password = strdup(seq+1);
+				co->password = turn_strdup(seq+1);
 			else if(!strcmp(s,"pwd"))
-				co->password = strdup(seq+1);
+				co->password = turn_strdup(seq+1);
 			else if(!strcmp(s,"passwd"))
-				co->password = strdup(seq+1);
+				co->password = turn_strdup(seq+1);
 			else if(!strcmp(s,"secret"))
-				co->password = strdup(seq+1);
+				co->password = turn_strdup(seq+1);
 			else if(!strcmp(s,"port"))
 				co->port = (unsigned int)atoi(seq+1);
 			else if(!strcmp(s,"p"))
@@ -314,11 +324,31 @@ static Myconninfo *MyconninfoParse(char *userdb, char **errmsg)
 				co->connect_timeout = (unsigned int)atoi(seq+1);
 			else if(!strcmp(s,"timeout"))
 				co->connect_timeout = (unsigned int)atoi(seq+1);
+			else if(!strcmp(s,"key"))
+				co->key = turn_strdup(seq+1);
+			else if(!strcmp(s,"ssl-key"))
+				co->key = turn_strdup(seq+1);
+			else if(!strcmp(s,"ca"))
+				co->ca = turn_strdup(seq+1);
+			else if(!strcmp(s,"ssl-ca"))
+				co->ca = turn_strdup(seq+1);
+			else if(!strcmp(s,"capath"))
+				co->capath = turn_strdup(seq+1);
+			else if(!strcmp(s,"ssl-capath"))
+				co->capath = turn_strdup(seq+1);
+			else if(!strcmp(s,"cert"))
+				co->cert = turn_strdup(seq+1);
+			else if(!strcmp(s,"ssl-cert"))
+				co->cert = turn_strdup(seq+1);
+			else if(!strcmp(s,"cipher"))
+				co->cipher = turn_strdup(seq+1);
+			else if(!strcmp(s,"ssl-cipher"))
+				co->cipher = turn_strdup(seq+1);
 			else {
 				MyconninfoFree(co);
 				co = NULL;
 				if(errmsg) {
-					*errmsg = strdup(s);
+					*errmsg = turn_strdup(s);
 				}
 				break;
 			}
@@ -329,14 +359,16 @@ static Myconninfo *MyconninfoParse(char *userdb, char **errmsg)
 		turn_free(s0, strlen(s0)+1);
 	}
 
-	if(!(co->dbname))
-		co->dbname=strdup("0");
-	if(!(co->host))
-		co->host=strdup("127.0.0.1");
-	if(!(co->user))
-		co->user=strdup("");
-	if(!(co->password))
-		co->password=strdup("");
+	if(co) {
+		if(!(co->dbname))
+			co->dbname=turn_strdup("0");
+		if(!(co->host))
+			co->host=turn_strdup("127.0.0.1");
+		if(!(co->user))
+			co->user=turn_strdup("");
+		if(!(co->password))
+			co->password=turn_strdup("");
+	}
 
 	return co;
 }
@@ -376,6 +408,9 @@ static MYSQL *get_mydb_connection(void)
 			} else {
 				if(co->connect_timeout)
 					mysql_options(mydbconnection,MYSQL_OPT_CONNECT_TIMEOUT,&(co->connect_timeout));
+				if(co->ca || co->capath || co->cert || co->cipher || co->key) {
+					mysql_ssl_set(mydbconnection, co->key, co->cert, co->ca, co->capath, co->cipher);
+				}
 				MYSQL *conn = mysql_real_connect(mydbconnection, co->host, co->user, co->password, co->dbname, co->port, NULL, CLIENT_IGNORE_SIGPIPE);
 				if(!conn) {
 					TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Cannot open MySQL DB connection: <%s>, runtime error\n",turn_params.users_params.userdb);
@@ -419,7 +454,7 @@ typedef struct _Ryconninfo Ryconninfo;
 static void RyconninfoFree(Ryconninfo *co) {
 	if(co) {
 		if(co->host) turn_free(co->host, strlen(co->host)+1);
-		if(co->dbname) turn_free(co->dbname, strlen(co->username)+1);
+		if(co->dbname) turn_free(co->dbname, strlen(co->dbname)+1);
 		if(co->password) turn_free(co->password, strlen(co->password)+1);
 		ns_bzero(co,sizeof(Ryconninfo));
 	}
@@ -430,7 +465,7 @@ static Ryconninfo *RyconninfoParse(char *userdb, char **errmsg)
 	Ryconninfo *co = (Ryconninfo*) turn_malloc(sizeof(Ryconninfo));
 	ns_bzero(co,sizeof(Ryconninfo));
 	if (userdb) {
-		char *s0 = strdup(userdb);
+		char *s0 = turn_strdup(userdb);
 		char *s = s0;
 
 		while (s && *s) {
@@ -448,28 +483,28 @@ static Ryconninfo *RyconninfoParse(char *userdb, char **errmsg)
 				RyconninfoFree(co);
 				co = NULL;
 				if (errmsg) {
-					*errmsg = strdup(s);
+					*errmsg = turn_strdup(s);
 				}
 				break;
 			}
 
 			*seq = 0;
 			if (!strcmp(s, "host"))
-				co->host = strdup(seq + 1);
+				co->host = turn_strdup(seq + 1);
 			else if (!strcmp(s, "ip"))
-				co->host = strdup(seq + 1);
+				co->host = turn_strdup(seq + 1);
 			else if (!strcmp(s, "addr"))
-				co->host = strdup(seq + 1);
+				co->host = turn_strdup(seq + 1);
 			else if (!strcmp(s, "ipaddr"))
-				co->host = strdup(seq + 1);
+				co->host = turn_strdup(seq + 1);
 			else if (!strcmp(s, "hostaddr"))
-				co->host = strdup(seq + 1);
+				co->host = turn_strdup(seq + 1);
 			else if (!strcmp(s, "dbname"))
-				co->dbname = strdup(seq + 1);
+				co->dbname = turn_strdup(seq + 1);
 			else if (!strcmp(s, "db"))
-				co->dbname = strdup(seq + 1);
+				co->dbname = turn_strdup(seq + 1);
 			else if (!strcmp(s, "database"))
-				co->dbname = strdup(seq + 1);
+				co->dbname = turn_strdup(seq + 1);
 			else if (!strcmp(s, "user"))
 				;
 			else if (!strcmp(s, "uname"))
@@ -479,13 +514,13 @@ static Ryconninfo *RyconninfoParse(char *userdb, char **errmsg)
 			else if (!strcmp(s, "username"))
 				;
 			else if (!strcmp(s, "password"))
-				co->password = strdup(seq + 1);
+				co->password = turn_strdup(seq + 1);
 			else if (!strcmp(s, "pwd"))
-				co->password = strdup(seq + 1);
+				co->password = turn_strdup(seq + 1);
 			else if (!strcmp(s, "passwd"))
-				co->password = strdup(seq + 1);
+				co->password = turn_strdup(seq + 1);
 			else if (!strcmp(s, "secret"))
-				co->password = strdup(seq + 1);
+				co->password = turn_strdup(seq + 1);
 			else if (!strcmp(s, "port"))
 				co->port = (unsigned int) atoi(seq + 1);
 			else if (!strcmp(s, "p"))
@@ -498,7 +533,7 @@ static Ryconninfo *RyconninfoParse(char *userdb, char **errmsg)
 				RyconninfoFree(co);
 				co = NULL;
 				if (errmsg) {
-					*errmsg = strdup(s);
+					*errmsg = turn_strdup(s);
 				}
 				break;
 			}
@@ -509,12 +544,14 @@ static Ryconninfo *RyconninfoParse(char *userdb, char **errmsg)
 		turn_free(s0, strlen(s0)+1);
 	}
 
-	if(!(co->dbname))
-		co->dbname=strdup("0");
-	if(!(co->host))
-		co->host=strdup("127.0.0.1");
-	if(!(co->password))
-		co->password=strdup("");
+	if(co) {
+		if(!(co->dbname))
+			co->dbname=turn_strdup("0");
+		if(!(co->host))
+			co->host=turn_strdup("127.0.0.1");
+		if(!(co->password))
+			co->password=turn_strdup("");
+	}
 
 	return co;
 }
@@ -591,19 +628,45 @@ static redisContext *get_redis_connection(void)
 				redisconnection = redisConnect(ip, port);
 			}
 
-			if (!redisconnection) {
-				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Cannot initialize Redis DB connection\n");
-			} else {
-				if (co->password) {
-					turnFreeRedisReply(redisCommand(redisconnection, "AUTH %s", co->password));
-				}
-				if (co->dbname) {
-					turnFreeRedisReply(redisCommand(redisconnection, "select %s", co->dbname));
-				}
-				if (!donot_print_connection_success) {
-					TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "Redis DB sync connection success: %s\n", turn_params.users_params.userdb);
+			if (redisconnection) {
+				if(redisconnection->err) {
+					if(redisconnection->errstr[0]) {
+						TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Redis: %s\n",redisconnection->errstr);
+					}
+					redisFree(redisconnection);
+					redisconnection = NULL;
+				} else if (co->password) {
+					void *reply = redisCommand(redisconnection, "AUTH %s", co->password);
+					if(!reply) {
+						if(redisconnection->err && redisconnection->errstr[0]) {
+							TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Redis: %s\n",redisconnection->errstr);
+						}
+						redisFree(redisconnection);
+						redisconnection = NULL;
+					} else {
+						turnFreeRedisReply(reply);
+						if (co->dbname) {
+							reply = redisCommand(redisconnection, "select %s", co->dbname);
+							if(!reply) {
+								if(redisconnection->err && redisconnection->errstr[0]) {
+									TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Redis: %s\n",redisconnection->errstr);
+								}
+								redisFree(redisconnection);
+								redisconnection = NULL;
+							} else {
+								turnFreeRedisReply(reply);
+							}
+						}
+					}
 				}
 			}
+
+			if (!redisconnection) {
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Cannot initialize Redis DB connection\n");
+			} else if (!donot_print_connection_success) {
+				TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "Redis DB sync connection success: %s\n", turn_params.users_params.userdb);
+			}
+
 			RyconninfoFree(co);
 		}
 	}
@@ -805,7 +868,7 @@ static char *get_real_username(char *usname)
 					usname = col+1;
 				} else {
 					*col=0;
-					usname = strdup(usname);
+					usname = turn_strdup(usname);
 					*col=turn_params.users_params.rest_api_separator;
 					return usname;
 				}
@@ -813,7 +876,7 @@ static char *get_real_username(char *usname)
 		}
 	}
 
-	return strdup(usname);
+	return turn_strdup(usname);
 }
 
 /*
@@ -842,7 +905,6 @@ int get_user_key(u08bits *usname, hmackey_t key, ioa_network_buffer_handle nbh)
 			u08bits hmac[MAXSHASIZE];
 			unsigned int hmac_len;
 			st_password_t pwdtmp;
-			SHATYPE shatype;
 
 			hmac[0] = 0;
 
@@ -855,11 +917,13 @@ int get_user_key(u08bits *usname, hmackey_t key, ioa_network_buffer_handle nbh)
 			int sarlen = stun_attr_get_len(sar);
 			switch(sarlen) {
 			case SHA1SIZEBYTES:
-				shatype = SHATYPE_SHA1;
+				if(turn_params.shatype != SHATYPE_SHA1)
+					return -1;
 				hmac_len = SHA1SIZEBYTES;
 				break;
 			case SHA256SIZEBYTES:
-				shatype = SHATYPE_SHA256;
+				if(turn_params.shatype != SHATYPE_SHA256)
+					return -1;
 				hmac_len = SHA256SIZEBYTES;
 				break;
 			default:
@@ -871,7 +935,7 @@ int get_user_key(u08bits *usname, hmackey_t key, ioa_network_buffer_handle nbh)
 				const char* secret = get_secrets_list_elem(&sl,sll);
 
 				if(secret) {
-					if(stun_calculate_hmac(usname, strlen((char*)usname), (const u08bits*)secret, strlen(secret), hmac, &hmac_len, shatype)>=0) {
+					if(stun_calculate_hmac(usname, strlen((char*)usname), (const u08bits*)secret, strlen(secret), hmac, &hmac_len, turn_params.shatype)>=0) {
 						size_t pwd_length = 0;
 						char *pwd = base64_encode(hmac,hmac_len,&pwd_length);
 
@@ -879,16 +943,14 @@ int get_user_key(u08bits *usname, hmackey_t key, ioa_network_buffer_handle nbh)
 							if(pwd_length<1) {
 								turn_free(pwd,strlen(pwd)+1);
 							} else {
-								if(stun_produce_integrity_key_str((u08bits*)usname, (u08bits*)turn_params.users_params.global_realm, (u08bits*)pwd, key)>=0) {
-
-									SHATYPE sht;
+								if(stun_produce_integrity_key_str((u08bits*)usname, (u08bits*)turn_params.users_params.global_realm, (u08bits*)pwd, key, turn_params.shatype)>=0) {
 
 									if(stun_check_message_integrity_by_key_str(TURN_CREDENTIALS_LONG_TERM,
 										ioa_network_buffer_data(nbh),
 										ioa_network_buffer_get_size(nbh),
 										key,
 										pwdtmp,
-										&sht)>0) {
+										turn_params.shatype,NULL)>0) {
 
 										ret = 0;
 									}
@@ -923,7 +985,8 @@ int get_user_key(u08bits *usname, hmackey_t key, ioa_network_buffer_handle nbh)
 	ur_string_map_unlock(turn_params.users_params.users.static_accounts);
 
 	if(ret==0) {
-		ns_bcopy(ukey,key,sizeof(hmackey_t));
+		size_t sz = get_hmackey_size(turn_params.shatype);
+		ns_bcopy(ukey,key,sz);
 		return 0;
 	}
 
@@ -939,8 +1002,12 @@ int get_user_key(u08bits *usname, hmackey_t key, ioa_network_buffer_handle nbh)
 				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Error retrieving PostgreSQL DB information: %s\n",PQerrorMessage(pqc));
 			} else {
 				char *kval = PQgetvalue(res,0,0);
+				int len = PQgetlength(res,0,0);
 				if(kval) {
-					if(convert_string_key_to_binary(kval, key)<0) {
+					size_t sz = get_hmackey_size(turn_params.shatype);
+					if(((size_t)len<sz*2)||(strlen(kval)<sz*2)) {
+						TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Wrong key format: %s, user %s\n",kval,usname);
+					} else if(convert_string_key_to_binary(kval, key, sz)<0) {
 						TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Wrong key: %s, user %s\n",kval,usname);
 					} else {
 						ret = 0;
@@ -977,14 +1044,14 @@ int get_user_key(u08bits *usname, hmackey_t key, ioa_network_buffer_handle nbh)
 					if(row && row[0]) {
 						unsigned long *lengths = mysql_fetch_lengths(mres);
 						if(lengths) {
-							size_t sz = sizeof(hmackey_t)*2;
-							if(lengths[0]!=sz) {
-								TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Wrong hmackey data for user %s, size in MySQL DB is %lu\n",usname,lengths[0]);
+							size_t sz = get_hmackey_size(turn_params.shatype)*2;
+							if(lengths[0]<sz) {
+								TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Wrong key format: string length=%d (must be %d): user %s\n",(int)lengths[0],(int)sz,usname);
 							} else {
 								char kval[sizeof(hmackey_t)+sizeof(hmackey_t)+1];
 								ns_bcopy(row[0],kval,sz);
 								kval[sz]=0;
-								if(convert_string_key_to_binary(kval, key)<0) {
+								if(convert_string_key_to_binary(kval, key, sz/2)<0) {
 									TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Wrong key: %s, user %s\n",kval,usname);
 								} else {
 									ret = 0;
@@ -1005,17 +1072,22 @@ int get_user_key(u08bits *usname, hmackey_t key, ioa_network_buffer_handle nbh)
 	{
 		redisContext * rc = get_redis_connection();
 		if(rc) {
+			ret = -1;
 			char s[LONG_STRING_SIZE];
 			snprintf(s,sizeof(s),"get turn/user/%s/key", usname);
 			redisReply *rget = (redisReply *)redisCommand(rc, s);
 			if(rget) {
-				if (rget->type == REDIS_REPLY_ERROR)
+				if (rget->type == REDIS_REPLY_ERROR) {
 					TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Error: %s\n", rget->str);
-				else if (rget->type != REDIS_REPLY_STRING) {
-					if (rget->type != REDIS_REPLY_NIL)
+				} else if (rget->type != REDIS_REPLY_STRING) {
+					if (rget->type != REDIS_REPLY_NIL) {
 						TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Unexpected type: %d\n", rget->type);
+					}
 				} else {
-					if(convert_string_key_to_binary(rget->str, key)<0) {
+					size_t sz = get_hmackey_size(turn_params.shatype);
+					if(strlen(rget->str)<sz*2) {
+						TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Wrong key format: %s, user %s\n",rget->str,usname);
+					} else if(convert_string_key_to_binary(rget->str, key, sz)<0) {
 						TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Wrong key: %s, user %s\n",rget->str,usname);
 					} else {
 						ret = 0;
@@ -1023,7 +1095,8 @@ int get_user_key(u08bits *usname, hmackey_t key, ioa_network_buffer_handle nbh)
 				}
 				turnFreeRedisReply(rget);
 			}
-			if(ret != 0) {
+
+			if(ret == 0) {
 				snprintf(s,sizeof(s),"get turn/user/%s/password", usname);
 				rget = (redisReply *)redisCommand(rc, s);
 				if(rget) {
@@ -1033,7 +1106,7 @@ int get_user_key(u08bits *usname, hmackey_t key, ioa_network_buffer_handle nbh)
 						if (rget->type != REDIS_REPLY_NIL)
 							TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Unexpected type: %d\n", rget->type);
 					} else {
-						if(stun_produce_integrity_key_str((u08bits*)usname, (u08bits*)turn_params.users_params.global_realm, (u08bits*)rget->str, key)>=0) {
+						if(stun_produce_integrity_key_str((u08bits*)usname, (u08bits*)turn_params.users_params.global_realm, (u08bits*)rget->str, key, turn_params.shatype)>=0) {
 							ret = 0;
 						}
 					}
@@ -1169,7 +1242,7 @@ int check_new_allocation_quota(u08bits *user)
 		ur_string_map_lock(turn_params.users_params.users.alloc_counters);
 		if (turn_params.users_params.users.total_quota && (turn_params.users_params.users.total_current_allocs >= turn_params.users_params.users.total_quota)) {
 			ret = -1;
-		} else {
+		} else if(username[0]){
 			ur_string_map_value_type value = 0;
 			if (!ur_string_map_get(turn_params.users_params.users.alloc_counters, (ur_string_map_key_type) username, &value)) {
 				value = (ur_string_map_value_type) 1;
@@ -1184,8 +1257,10 @@ int check_new_allocation_quota(u08bits *user)
 					++(turn_params.users_params.users.total_current_allocs);
 				}
 			}
+		} else {
+			++(turn_params.users_params.users.total_current_allocs);
 		}
-		turn_free(username,strlen(username)+1);
+		turn_free(username,strlen((char*)username)+1);
 		ur_string_map_unlock(turn_params.users_params.users.alloc_counters);
 	}
 	return ret;
@@ -1205,7 +1280,7 @@ void release_allocation_quota(u08bits *user)
 		if (turn_params.users_params.users.total_current_allocs)
 			--(turn_params.users_params.users.total_current_allocs);
 		ur_string_map_unlock(turn_params.users_params.users.alloc_counters);
-		turn_free(username, strlen(username)+1);
+		turn_free(username, strlen((char*)username)+1);
 	}
 }
 
@@ -1306,14 +1381,17 @@ int add_user_account(char *user, int dynamic)
 			hmackey_t *key = (hmackey_t*)turn_malloc(sizeof(hmackey_t));
 			if(strstr(s,"0x")==s) {
 				char *keysource = s + 2;
-				if(convert_string_key_to_binary(keysource, *key)<0) {
+				size_t sz = get_hmackey_size(turn_params.shatype);
+				if(strlen(keysource)<sz*2) {
+					TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Wrong key format: %s\n",s);
+				} if(convert_string_key_to_binary(keysource, *key, sz)<0) {
 					TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Wrong key: %s\n",s);
-					free(usname);
-					free(key);
+					turn_free(usname,strlen((char*)usname)+1);
+					turn_free(key,sizeof(hmackey_t));
 					return -1;
 				}
 			} else {
-				stun_produce_integrity_key_str((u08bits*)usname, (u08bits*)turn_params.users_params.global_realm, (u08bits*)s, *key);
+				stun_produce_integrity_key_str((u08bits*)usname, (u08bits*)turn_params.users_params.global_realm, (u08bits*)s, *key, turn_params.shatype);
 			}
 			if(dynamic) {
 				ur_string_map_lock(turn_params.users_params.users.dynamic_accounts);
@@ -1325,7 +1403,7 @@ int add_user_account(char *user, int dynamic)
 				ur_string_map_unlock(turn_params.users_params.users.static_accounts);
 			}
 			turn_params.users_params.users_number++;
-			free(usname);
+			turn_free(usname,strlen(usname)+1);
 			return 0;
 		}
 	}
@@ -1415,7 +1493,7 @@ static int list_users(int is_st)
 			redisReply *reply = NULL;
 
 			if(!is_st) {
-				redisReply *reply = (redisReply*)redisCommand(rc, "keys turn/user/*/key");
+				reply = (redisReply*)redisCommand(rc, "keys turn/user/*/key");
 				if(reply) {
 
 					if (reply->type == REDIS_REPLY_ERROR)
@@ -1777,16 +1855,17 @@ int adminuser(u08bits *user, u08bits *realm, u08bits *pwd, u08bits *secret, TURN
 				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Error: with long-term mechanism, you must specify the realm !\n");
 				exit(-1);
 			}
-			stun_produce_integrity_key_str(user, realm, pwd, key);
+			stun_produce_integrity_key_str(user, realm, pwd, key, turn_params.shatype);
 			size_t i = 0;
-			int maxsz = (int)sizeof(skey);
+			size_t sz = get_hmackey_size(turn_params.shatype);
+			int maxsz = (int)(sz*2)+1;
 			char *s=skey;
-			for(i=0;(i<sizeof(hmackey_t)) && (maxsz>2);i++) {
-			  snprintf(s,(size_t)maxsz,"%02x",(unsigned int)key[i]);
-			  s+=2;
+			for(i=0;(i<sz) && (maxsz>2);i++) {
+			  snprintf(s,(size_t)(sz*2),"%02x",(unsigned int)key[i]);
 			  maxsz-=2;
+			  s+=2;
 			}
-			skey[sizeof(skey)-1]=0;
+			skey[sz*2]=0;
 		}
 	}
 
@@ -1953,7 +2032,8 @@ int adminuser(u08bits *user, u08bits *realm, u08bits *pwd, u08bits *secret, TURN
 					STRCPY(us, (char*) user);
 					strncpy(us + strlen(us), ":0x", sizeof(us)-1-strlen(us));
 					us[sizeof(us)-1]=0;
-					for (i = 0; i < sizeof(hmackey_t); i++) {
+					size_t sz = get_hmackey_size(turn_params.shatype);
+					for (i = 0; i < sz; i++) {
 						snprintf(
 							us + strlen(us),
 							sizeof(us)-strlen(us),
@@ -1965,8 +2045,8 @@ int adminuser(u08bits *user, u08bits *realm, u08bits *pwd, u08bits *secret, TURN
 				}
 
 				add_and_cont:
-				content = (char**)realloc(content, sizeof(char*) * (++csz));
-				content[csz - 1] = strdup(s0);
+				content = (char**)turn_realloc(content, 0, sizeof(char*) * (++csz));
+				content[csz - 1] = turn_strdup(s0);
 			}
 
 			fclose(f);
@@ -1976,15 +2056,16 @@ int adminuser(u08bits *user, u08bits *realm, u08bits *pwd, u08bits *secret, TURN
 		  STRCPY(us,(char*)user);
 		  strncpy(us+strlen(us),":0x",sizeof(us)-1-strlen(us));
 		  us[sizeof(us)-1]=0;
-		  for(i=0;i<sizeof(hmackey_t);i++) {
+		  size_t sz = get_hmackey_size(turn_params.shatype);
+		  for(i=0;i<sz;i++) {
 		    snprintf(us+strlen(us),sizeof(us)-strlen(us),"%02x",(unsigned int)key[i]);
 		  }
-		  content = (char**)realloc(content,sizeof(char*)*(++csz));
-		  content[csz-1]=strdup(us);
+		  content = (char**)turn_realloc(content,0,sizeof(char*)*(++csz));
+		  content[csz-1]=turn_strdup(us);
 		}
 
 		if(!full_path_to_userdb_file)
-			full_path_to_userdb_file=strdup(turn_params.users_params.userdb);
+			full_path_to_userdb_file=turn_strdup(turn_params.users_params.userdb);
 
 		size_t dirsz = strlen(full_path_to_userdb_file)+21;
 		char *dir = (char*)turn_malloc(dirsz+1);
@@ -2010,7 +2091,7 @@ int adminuser(u08bits *user, u08bits *realm, u08bits *pwd, u08bits *secret, TURN
 		fclose(f);
 
 		rename(dir,full_path_to_userdb_file);
-		free(dir);
+		turn_free(dir,dirsz+1);
 	}
 
 	return 0;
@@ -2280,15 +2361,15 @@ static void ip_list_free(ip_range_list_t *l)
 		size_t i;
 		for(i=0;i<l->ranges_number;++i) {
 			if(l->ranges && l->ranges[i])
-				free(l->ranges[i]);
+				turn_free(l->ranges[i],strlen(l->ranges[i])+1);
 			if(l->encaddrsranges && l->encaddrsranges[i])
-				free(l->encaddrsranges[i]);
+				turn_free(l->encaddrsranges[i],sizeof(ioa_addr_range));
 		}
 		if(l->ranges)
-			free(l->ranges);
+			turn_free(l->ranges,l->ranges_number * sizeof(char*));
 		if(l->encaddrsranges)
-			free(l->encaddrsranges);
-		free(l);
+			turn_free(l->encaddrsranges,l->ranges_number * sizeof(ioa_addr_range*));
+		turn_free(l,sizeof(ip_range_list_t));
 	}
 }
 
@@ -2345,9 +2426,9 @@ int add_ip_list_range(char* range, ip_range_list_t * list)
 		*separator = '-';
 
 	++(list->ranges_number);
-	list->ranges = (char**) realloc(list->ranges, sizeof(char*) * list->ranges_number);
-	list->ranges[list->ranges_number - 1] = strdup(range);
-	list->encaddrsranges = (ioa_addr_range**) realloc(list->encaddrsranges, sizeof(ioa_addr_range*) * list->ranges_number);
+	list->ranges = (char**) turn_realloc(list->ranges, 0, sizeof(char*) * list->ranges_number);
+	list->ranges[list->ranges_number - 1] = turn_strdup(range);
+	list->encaddrsranges = (ioa_addr_range**) turn_realloc(list->encaddrsranges, 0, sizeof(ioa_addr_range*) * list->ranges_number);
 
 	list->encaddrsranges[list->ranges_number - 1] = (ioa_addr_range*) turn_malloc(sizeof(ioa_addr_range));
 
